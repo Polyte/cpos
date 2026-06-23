@@ -1,0 +1,102 @@
+{
+  "phases": [
+    {
+      "id": "phase1",
+      "name": "Foundation — UI Primitives & Utilities",
+      "status": "completed",
+      "files": [
+        { "path": "src/lib/components/ui/utils.ts", "from": "src/app/components/ui/utils.ts", "status": "completed" },
+        { "path": "src/lib/components/ui/use-mobile.ts", "from": "src/app/components/ui/use-mobile.ts", "status": "completed" },
+        { "path": "src/lib/components/ui/Button.svelte", "from": "src/app/components/ui/button.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Card.svelte", "from": "src/app/components/ui/card.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/CardHeader.svelte", "from": "src/app/components/ui/card.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/CardTitle.svelte", "from": "src/app/components/ui/card.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/CardDescription.svelte", "from": "src/app/components/ui/card.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/CardContent.svelte", "from": "src/app/components/ui/card.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/CardFooter.svelte", "from": "src/app/components/ui/card.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Input.svelte", "from": "src/app/components/ui/input.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Badge.svelte", "from": "src/app/components/ui/badge.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Label.svelte", "from": "src/app/components/ui/label.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Separator.svelte", "from": "src/app/components/ui/separator.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Avatar.svelte", "from": "src/app/components/ui/avatar.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Textarea.svelte", "from": "src/app/components/ui/textarea.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Table.svelte", "from": "src/app/components/ui/table.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/TableHeader.svelte", "from": "src/app/components/ui/table.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/TableBody.svelte", "from": "src/app/components/ui/table.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/TableRow.svelte", "from": "src/app/components/ui/table.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/TableHead.svelte", "from": "src/app/components/ui/table.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/TableCell.svelte", "from": "src/app/components/ui/table.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Select.svelte", "from": "src/app/components/ui/select.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Dialog.svelte", "from": "src/app/components/ui/dialog.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Switch.svelte", "from": "src/app/components/ui/switch.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Checkbox.svelte", "from": "src/app/components/ui/checkbox.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Tabs.svelte", "from": "src/app/components/ui/tabs.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/DropdownMenu.svelte", "from": "src/app/components/ui/dropdown-menu.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Tooltip.svelte", "from": "src/app/components/ui/tooltip.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Popover.svelte", "from": "src/app/components/ui/popover.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Skeleton.svelte", "from": "src/app/components/ui/skeleton.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Progress.svelte", "from": "src/app/components/ui/progress.tsx", "status": "completed" },
+        { "path": "src/lib/components/ui/Sheet.svelte", "from": "src/app/components/ui/sheet.tsx", "status": "completed" }
+      ]
+    },
+    {
+      "id": "phase2a",
+      "name": "Core POS Components",
+      "status": "completed",
+      "files": [
+        { "path": "src/lib/components/POSInterface.svelte", "from": "src/app/components/POSInterface.tsx", "status": "completed" },
+        { "path": "src/lib/components/RestaurantPOS.svelte", "from": "src/app/components/RestaurantPOS.tsx", "status": "completed" },
+        { "path": "src/lib/components/MobilePOS.svelte", "from": "src/app/components/MobilePOS.tsx", "status": "completed" },
+        { "path": "src/lib/components/ShiftReport.svelte", "from": "src/app/components/ShiftReport.tsx", "status": "completed" },
+        { "path": "src/lib/components/MobileShiftReport.svelte", "from": "src/app/components/MobileShiftReport.tsx", "status": "completed" }
+      ]
+    },
+    {
+      "id": "phase2b",
+      "name": "Merchant & Reporting Components",
+      "status": "completed",
+      "files": [
+        { "path": "src/lib/components/MerchantManagement.svelte", "from": "src/app/components/MerchantManagement.tsx", "status": "completed" },
+        { "path": "src/lib/components/MerchantSettings.svelte", "from": "src/app/components/MerchantSettings.tsx", "status": "completed" },
+        { "path": "src/lib/components/MerchantOnboarding.svelte", "from": "src/app/components/MerchantOnboarding.tsx", "status": "completed" },
+        { "path": "src/lib/components/Reports.svelte", "from": "src/app/components/Reports.tsx", "status": "completed" },
+        { "path": "src/lib/components/ForensicLedger.svelte", "from": "src/app/components/ForensicLedger.tsx", "status": "completed" }
+      ]
+    },
+    {
+      "id": "phase2c",
+      "name": "Management & Support Components",
+      "status": "completed",
+      "files": [
+        { "path": "src/lib/components/IdentityManagement.svelte", "from": "src/app/components/IdentityManagement.tsx", "status": "completed" },
+        { "path": "src/lib/components/CustomerManagement.svelte", "from": "src/app/components/CustomerManagement.tsx", "status": "completed" },
+        { "path": "src/lib/components/ManagerDashboard.svelte", "from": "src/app/components/ManagerDashboard.tsx", "status": "completed" },
+        { "path": "src/lib/components/SupportCenter.svelte", "from": "src/app/components/SupportCenter.tsx", "status": "completed" },
+        { "path": "src/lib/components/WorkshopManagement.svelte", "from": "src/app/components/WorkshopManagement.tsx", "status": "completed" }
+      ]
+    },
+    {
+      "id": "phase3",
+      "name": "Secondary Components",
+      "status": "completed",
+      "files": [
+        { "path": "src/lib/components/CloseDayWizard.svelte", "from": "src/app/components/CloseDayWizard.tsx", "status": "completed" },
+        { "path": "src/lib/components/SupervisorOverrideModal.svelte", "from": "src/app/components/SupervisorOverrideModal.tsx", "status": "completed" },
+        { "path": "src/lib/components/NetworkSwarm.svelte", "from": "src/app/components/NetworkSwarm.tsx", "status": "completed" },
+        { "path": "src/lib/components/TerminalManager.svelte", "from": "src/app/components/TerminalManager.tsx", "status": "completed" },
+        { "path": "src/lib/components/figma/ImageWithFallback.svelte", "from": "src/app/components/figma/ImageWithFallback.tsx", "status": "completed" },
+        { "path": "src/lib/components/ErrorFallback.svelte", "from": "src/app/components/ErrorBoundary.tsx", "status": "completed" }
+      ]
+    },
+    {
+      "id": "phase4",
+      "name": "Wire Up — App.svelte + Cleanup",
+      "status": "completed",
+      "files": [
+        { "path": "src/App.svelte", "from": "src/app/App.tsx (shell merged)", "status": "completed" },
+        { "path": "src/main.ts (cleanup)", "from": "src/main.tsx → deleted", "status": "completed" },
+        { "path": "package.json (deps cleanup)", "from": "Remove React deps", "status": "completed" }
+      ]
+    }
+  ]
+}

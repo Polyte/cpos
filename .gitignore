@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Build output
+dist/
+build/
+.svelte-kit/
+.vite/
+
+# Nested local repositories
+mobile-app/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime and cache files
+.cache/
+.temp/
+.turbo/
+.vercel/
+.netlify/
+coverage/
+
+# Supabase local CLI state
+supabase/.temp/
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Local MCP and agent state
+.mcp.json
+.claude/
+.agents/
+
+# Accidental Windows artifact
+nul
