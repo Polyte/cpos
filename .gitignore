@@ -13,9 +13,6 @@ build/
 .svelte-kit/
 .vite/
 
-# Nested local repositories
-mobile-app/
-
 # Logs
 *.log
 npm-debug.log*
@@ -40,6 +37,7 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+mobile-app/.git-backup-before-parent-add/
 
 # Local MCP and agent state
 .mcp.json
