@@ -74,6 +74,9 @@
     lineItems: Array<{ name: string; qty: number; price: number; total: number; course: string; notes: string; kotId: string; kotTime: string }>;
     subtotal: number;
     kotCount: number;
+    customerName?: string;
+    customerEmail?: string;
+    customerPhone?: string;
   }
 
   const COURSE_CATEGORIES = [
@@ -167,6 +170,8 @@
   let settling = $state(false);
   let showReceipt = $state(false);
   let receiptData: any = $state(null);
+  let invoiceEmail = $state('');
+  let emailInvoiceSending = $state(false);
   let showSplitBill = $state(false);
   let splitMethod: SplitMethod = $state('equal');
   let splitCount = $state(2);
@@ -342,6 +347,7 @@
     discountAmount = 0;
     cashTendered = '';
     showReceipt = false;
+    invoiceEmail = '';
     try {
       const data = await api.getTableBill(MERCHANT_ID, tableId);
       if (data && !data.error) {
@@ -465,6 +471,9 @@
         lineItems: billData.lineItems,
         subtotal: billData.subtotal,
         guestCount: billData.guestCount,
+        customerName: billData.customerName,
+        customerEmail: billData.customerEmail,
+        customerPhone: billData.customerPhone,
       });
 
       if (res.success) {
@@ -482,7 +491,11 @@
           discount: discountAmount,
           grandTotal: derivedGrandTotal,
           lineItems: billData.lineItems,
+          customerName: billData.customerName,
+          customerEmail: billData.customerEmail,
+          customerPhone: billData.customerPhone,
         };
+        invoiceEmail = receiptData.customerEmail || '';
         showReceipt = true;
 
         await Promise.all([loadTables(), loadKOTs()]);
@@ -500,6 +513,20 @@
     } finally {
       settling = false;
     }
+  }
+
+  async function emailSettledInvoice() {
+    if (!receiptData) return;
+    emailInvoiceSending = true;
+    const result = await api.emailRestaurantInvoice({
+      to: invoiceEmail,
+      merchantId: MERCHANT_ID,
+      transaction: receiptData,
+      lineItems: receiptData.lineItems || [],
+    });
+    emailInvoiceSending = false;
+    if (result.success) toast.success(`Invoice queued for ${invoiceEmail}`);
+    else toast.error(result.error || 'Could not email invoice');
   }
 
   // --- Split Bill ---
@@ -675,11 +702,11 @@
   }
 
   function tableMenuUrl(tableId: string) {
-    // A phone cannot resolve the computer's localhost. Use the configured LAN
-    // origin for local QR codes, while hosted deployments keep their origin.
+    // When the POS is opened through ngrok, window.location.origin is the
+    // current public tunnel URL. A configured origin still takes precedence
+    // for LAN testing or a stable hosted menu domain.
     const configuredOrigin = import.meta.env.VITE_PUBLIC_MENU_ORIGIN;
-    const mobileTunnelOrigin = 'https://enter-figure-maintain-gallery.trycloudflare.com';
-    const origin = configuredOrigin || (['localhost', '127.0.0.1'].includes(window.location.hostname) ? mobileTunnelOrigin : window.location.origin);
+    const origin = (configuredOrigin || window.location.origin).replace(/\/$/, '');
     return `${origin}/menu?merchantId=${encodeURIComponent(MERCHANT_ID)}&tableId=${encodeURIComponent(tableId)}`;
   }
 </script>
@@ -1601,6 +1628,14 @@
                   Back to Floor
                 </button>
                 <div class="flex items-center gap-2">
+                  <button
+                    onclick={emailSettledInvoice}
+                    disabled={emailInvoiceSending || !invoiceEmail.trim()}
+                    class="px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 rounded-lg font-black text-[9px] uppercase tracking-widest hover:bg-indigo-500/20 transition-all flex items-center gap-2 disabled:opacity-40"
+                  >
+                    {emailInvoiceSending ? 'Queueing…' : 'Email invoice'}
+                  </button>
+                  <input type="email" bind:value={invoiceEmail} placeholder="customer@email.com" aria-label="Customer invoice email" class="w-44 px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-[10px] text-neutral-200 outline-none focus:border-indigo-400" />
                   <button
                     onclick={() => toast.success('Receipt sent to thermal printer')}
                     class="px-4 py-2 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-lg font-black text-[9px] uppercase tracking-widest hover:bg-amber-500/20 transition-all flex items-center gap-2"

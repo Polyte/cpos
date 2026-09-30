@@ -27,6 +27,11 @@ export default defineConfig({
     },
   },
   assetsInclude: ['**/*.svg', '**/*.csv'],
+  server: {
+    // Allow the active ngrok hostname to proxy the dev server. This is
+    // required for QR-menu testing from phones on the public tunnel.
+    allowedHosts: true,
+  },
   preview: {
     // Required when the local preview is opened through a temporary HTTPS
     // tunnel for mobile testing or QR menu access.

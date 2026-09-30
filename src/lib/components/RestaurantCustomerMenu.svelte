@@ -24,6 +24,8 @@
   let menu = $state<any[]>([]);
   let cart = $state<Record<string, any>>({});
   let customerName = $state('');
+  let customerEmail = $state('');
+  let customerPhone = $state('');
   let notes = $state('');
   let paymentMethod = $state<'At table' | 'Card on phone' | 'Apple Pay' | 'Online bank'>('Card on phone');
   let loading = $state(true);
@@ -93,8 +95,9 @@
   async function submit() {
     if (!tableId) return toast.error('This QR code is missing a table number.');
     if (!cartItems.length) return toast.error('Add at least one item.');
+    if (customerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail.trim())) return toast.error('Enter a valid email address or leave it blank.');
     submitting = true;
-    const result = await api.submitRestaurantOrder({ merchantId, tableId, customerName, notes, items: cartItems.map((item: any) => ({ id: item.id, quantity: item.quantity })) });
+    const result = await api.submitRestaurantOrder({ merchantId, tableId, customerName, customerEmail, customerPhone, notes, items: cartItems.map((item: any) => ({ id: item.id, quantity: item.quantity })) });
     submitting = false;
     if (!result.success) return toast.error(result.error || 'Could not send order');
     submitted = result.order;
@@ -149,7 +152,7 @@
         {/each}
         {#if !filteredMenu.length}<div class="col-span-full rounded-3xl bg-white p-10 text-center text-sm text-stone-500">No dishes match your search.</div>{/if}
       </div>
-      <div id="order-form" class="rounded-3xl border border-stone-200 bg-white p-4 shadow-sm"><p class="mb-3 text-[9px] font-black uppercase tracking-[0.2em] text-stone-500">Before we send it</p><div class="space-y-3"><input bind:value={customerName} placeholder="Your name (optional)" class="w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-amber-400" /><textarea bind:value={notes} placeholder="Allergies or special requests" class="min-h-20 w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-amber-400"></textarea><div class="hidden items-center justify-between sm:flex"><span class="font-black">Total</span><span class="text-2xl font-black">R{Number(total).toFixed(2)}</span></div><button onclick={submit} disabled={submitting || !cartItems.length} class="hidden w-full items-center justify-center gap-2 rounded-xl bg-amber-500 py-4 font-black disabled:opacity-50 sm:flex"><Send size={17} />{submitting ? 'Sending…' : 'Send order to waiter'}</button></div></div>
+      <div id="order-form" class="rounded-3xl border border-stone-200 bg-white p-4 shadow-sm"><p class="mb-3 text-[9px] font-black uppercase tracking-[0.2em] text-stone-500">Before we send it</p><div class="space-y-3"><input bind:value={customerName} placeholder="Your name (optional)" class="w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-amber-400" /><div class="grid gap-3 sm:grid-cols-2"><input type="email" bind:value={customerEmail} placeholder="Email for invoice (optional)" class="w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-amber-400" /><input type="tel" bind:value={customerPhone} placeholder="Mobile number (optional)" class="w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-amber-400" /></div><textarea bind:value={notes} placeholder="Allergies or special requests" class="min-h-20 w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm outline-none focus:border-amber-400"></textarea><p class="text-[10px] text-stone-400">Your details are used only to identify the order and send the settled invoice.</p><div class="hidden items-center justify-between sm:flex"><span class="font-black">Total</span><span class="text-2xl font-black">R{Number(total).toFixed(2)}</span></div><button onclick={submit} disabled={submitting || !cartItems.length} class="hidden w-full items-center justify-center gap-2 rounded-xl bg-amber-500 py-4 font-black disabled:opacity-50 sm:flex"><Send size={17} />{submitting ? 'Sending…' : 'Send order to waiter'}</button></div></div>
     {/if}
   </section>
 </main>

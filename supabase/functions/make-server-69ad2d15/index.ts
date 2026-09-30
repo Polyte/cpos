@@ -389,6 +389,12 @@ function internalBarcode(item: any): string {
   return `290${String(hash % 1_000_000_000).padStart(9, '0')}`;
 }
 
+function productCloudKey(item: any): string {
+  const rawBarcode = String(item.barcode || '').trim();
+  // Treat common barcode formatting differences as the same product.
+  return (rawBarcode ? rawBarcode.replace(/[\s-]/g, '').toUpperCase() : internalBarcode(item));
+}
+
 function decodeHtml(value: string): string {
   return value
     .replace(/&amp;/g, '&')
@@ -400,15 +406,13 @@ function decodeHtml(value: string): string {
     .trim();
 }
 
-async function upsertProductCloud(item: any) {
-  const barcode = String(item.barcode || internalBarcode(item)).trim();
-  const key = `product_cloud:${barcode}`;
-  const existing = await kv.get(key);
+function buildProductCloudRecord(item: any, existing: any = null) {
+  const barcode = productCloudKey(item);
   const merchantIds = Array.from(new Set([
     ...(existing?.merchantIds || []),
     ...(item.merchantId ? [item.merchantId] : [])
   ]));
-  await kv.set(key, {
+  return {
     ...(existing || {}),
     id: existing?.id || `cloud:${barcode}`,
     barcode,
@@ -431,7 +435,26 @@ async function upsertProductCloud(item: any) {
     merchantIds,
     source: item.source || existing?.source || 'Clinton POS inventory',
     updatedAt: new Date().toISOString(),
-  });
+  };
+}
+
+async function upsertProductCloud(item: any) {
+  const barcode = productCloudKey(item);
+  const existing = await kv.get(`product_cloud:${barcode}`);
+  await kv.set(`product_cloud:${barcode}`, buildProductCloudRecord(item, existing));
+}
+
+async function upsertProductCloudBatch(items: any[]) {
+  const itemByKey = new Map<string, any>();
+  for (const item of items) {
+    const barcode = productCloudKey(item);
+    itemByKey.set(`product_cloud:${barcode}`, item);
+  }
+  const keys = Array.from(itemByKey.keys());
+  const existing = await kv.mget(keys);
+  const values = keys.map((key, index) => buildProductCloudRecord(itemByKey.get(key), existing[index]));
+  await kv.mset(keys, values);
+  return values.length;
 }
 
 // Demo catalog artwork. These are generic, non-branded Unsplash photos so the
@@ -2202,19 +2225,75 @@ routes.get('/product-cloud', async (c) => {
   }
   const query = (c.req.query('query') || '').trim().toLowerCase();
   const responseLimit = Math.min(Math.max(Number(c.req.query('limit')) || 500, 1), 2000);
-  const products = await kv.getByPrefix('product_cloud:');
-  const filtered = (products || []).filter((product: any) => {
-    if (!query) return true;
-    return [product.barcode, product.name, product.brand, product.sku]
-      .some((value) => String(value || '').toLowerCase().includes(query));
+  // Do not use kv.getByPrefix here: the LoyaltyHub catalog can contain tens
+  // of thousands of rows, and materialising the entire prefix in an Edge
+  // worker causes Supabase to terminate the request with WORKER_RESOURCE_LIMIT.
+  // Let SQLite/Turso apply the prefix, search, and limit before values enter
+  // the worker's memory.
+  const client = getTursoClient();
+  const result = query
+    ? await client.execute({
+        sql: 'SELECT value FROM kv_store WHERE key LIKE ? AND lower(value) LIKE ? ORDER BY key LIMIT ?',
+        args: ['product_cloud:%', `%${query}%`, responseLimit],
+      })
+    : await client.execute({
+        sql: 'SELECT value FROM kv_store WHERE key LIKE ? ORDER BY key LIMIT ?',
+        args: ['product_cloud:%', responseLimit],
+      });
+  const products = result.rows.map((row: any) => {
+    try {
+      return JSON.parse(String(row.value));
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+  return c.json(products.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name))));
+});
+
+routes.get('/product-cloud/count', async (c) => {
+  const authUser = c.get('authUser');
+  if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Product Cloud access denied' }, 403);
+  }
+  const client = getTursoClient();
+  const result = await client.execute({
+    sql: 'SELECT COUNT(*) AS count FROM kv_store WHERE key LIKE ?',
+    args: ['product_cloud:%'],
   });
-  return c.json(filtered.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name))).slice(0, responseLimit));
+  return c.json({ count: Number(result.rows[0]?.count || 0) });
+});
+
+routes.get('/product-cloud/page', async (c) => {
+  const authUser = c.get('authUser');
+  if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Product Cloud access denied' }, 403);
+  }
+  const query = (c.req.query('query') || '').trim().toLowerCase();
+  const page = Math.max(Number(c.req.query('page')) || 1, 1);
+  const limit = Math.min(Math.max(Number(c.req.query('limit')) || 100, 1), 100);
+  const offset = (page - 1) * limit;
+  const client = getTursoClient();
+  const whereSql = query
+    ? 'key LIKE ? AND lower(value) LIKE ?'
+    : 'key LIKE ?';
+  const whereArgs = query ? ['product_cloud:%', `%${query}%`] : ['product_cloud:%'];
+  const [countResult, rowsResult] = await Promise.all([
+    client.execute({ sql: `SELECT COUNT(*) AS count FROM kv_store WHERE ${whereSql}`, args: whereArgs }),
+    client.execute({
+      sql: `SELECT value FROM kv_store WHERE ${whereSql} ORDER BY key LIMIT ? OFFSET ?`,
+      args: [...whereArgs, limit, offset],
+    }),
+  ]);
+  const products = rowsResult.rows.map((row: any) => {
+    try { return JSON.parse(String(row.value)); } catch { return null; }
+  }).filter(Boolean).sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+  return c.json({ page, limit, total: Number(countResult.rows[0]?.count || 0), products });
 });
 
 routes.delete('/product-cloud/:barcode', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Product Cloud deletion requires Admin access' }, 403);
-  const barcode = String(c.req.param('barcode') || '').trim();
+  const barcode = String(c.req.param('barcode') || '').trim().replace(/[\s-]/g, '').toUpperCase();
   if (!barcode) return c.json({ error: 'Barcode required' }, 400);
   await kv.del(`product_cloud:${barcode}`);
   return c.json({ success: true, barcode });
@@ -2224,6 +2303,67 @@ routes.delete('/product-cloud/:barcode', async (c) => {
 // catalogue. The products page is a featured slice; the catalogue endpoint
 // contains the broader retailer inventory and is paged to keep each request
 // within Edge Function execution limits.
+let loyaltyHubCatalogClient: { url: string; key: string } | null | undefined;
+
+async function resolveLoyaltyHubCatalogClient(): Promise<{ url: string; key: string } | null> {
+  if (loyaltyHubCatalogClient !== undefined) return loyaltyHubCatalogClient;
+  const configuredUrl = Deno.env.get('LOYALTYHUB_SUPABASE_URL');
+  const configuredKey = Deno.env.get('LOYALTYHUB_SUPABASE_ANON_KEY');
+  if (configuredUrl && configuredKey) {
+    loyaltyHubCatalogClient = { url: configuredUrl.replace(/\/$/, ''), key: configuredKey };
+    return loyaltyHubCatalogClient;
+  }
+
+  const pageCandidates = [
+    'https://loyaltyhub.co.za/search',
+    'https://loyaltyhub.co.za/products',
+    'https://loyaltyhub.co.za/_next/static/chunks/app/search/page-64f7718c8e79f3f1.js',
+  ];
+  const scriptUrls = new Set<string>();
+  const sourceTexts: string[] = [];
+
+  for (const candidate of pageCandidates) {
+    try {
+      const response = await fetch(candidate, { headers: { Accept: 'text/html,application/javascript' } });
+      if (!response.ok) continue;
+      const text = await response.text();
+      sourceTexts.push(text);
+      for (const match of text.matchAll(/(?:src|href)=["']([^"']*\/search\/page-[^"']+\.js)["']/g)) {
+        scriptUrls.add(match[1].startsWith('http') ? match[1] : `https://loyaltyhub.co.za${match[1]}`);
+      }
+    } catch (error) {
+      console.warn('[LoyaltyHub catalogue] Failed to inspect candidate:', candidate, error);
+    }
+  }
+
+  for (const scriptUrl of scriptUrls) {
+    try {
+      const response = await fetch(scriptUrl, { headers: { Accept: 'application/javascript' } });
+      if (response.ok) sourceTexts.push(await response.text());
+    } catch (error) {
+      console.warn('[LoyaltyHub catalogue] Failed to inspect script:', scriptUrl, error);
+    }
+  }
+
+  const patterns = [
+    /createBrowserClient\s*\)\s*\(\s*["'](https:\/\/[^"']+)["']\s*,\s*["']([^"']+)["']\s*\)/,
+    /createBrowserClient\s*\(\s*["'](https:\/\/[^"']+)["']\s*,\s*["']([^"']+)["']\s*\)/,
+  ];
+  for (const source of sourceTexts) {
+    for (const pattern of patterns) {
+      const match = source.match(pattern);
+      if (match) {
+        loyaltyHubCatalogClient = { url: match[1].replace(/\/$/, ''), key: match[2] };
+        return loyaltyHubCatalogClient;
+      }
+    }
+  }
+  // Do not cache a failed discovery; a transient upstream failure should be
+  // retryable on the next import batch or the next user attempt.
+  loyaltyHubCatalogClient = undefined;
+  return null;
+}
+
 routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
   const authUser = c.get('authUser');
   if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'LoyaltyHub import requires Admin access' }, 403);
@@ -2232,10 +2372,9 @@ routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
   const offset = Math.max(Number(body.offset) || 0, 0);
   const limit = Math.min(Math.max(Number(body.limit) || 250, 1), 500);
   try {
-    const js = await (await fetch('https://loyaltyhub.co.za/_next/static/chunks/app/search/page-64f7718c8e79f3f1.js')).text();
-    const client = js.match(/createBrowserClient\)\("(https:\/\/[^" ]+)","([^"]+)"\)/);
-    if (!client) return c.json({ success: false, error: 'LoyaltyHub catalogue configuration unavailable' }, 502);
-    const [, supabaseUrl, supabaseKey] = client;
+    const client = await resolveLoyaltyHubCatalogClient();
+    if (!client) return c.json({ success: false, error: 'LoyaltyHub catalogue configuration unavailable. Set LOYALTYHUB_SUPABASE_URL and LOYALTYHUB_SUPABASE_ANON_KEY on the server.' }, 502);
+    const { url: supabaseUrl, key: supabaseKey } = client;
     const params = new URLSearchParams({
       select: 'retailer,retailer_sku,barcode,name,brand,price,currency,unit_size,category,image_url,product_url,in_stock',
       offset: String(offset),
@@ -2244,14 +2383,20 @@ routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
     const response = await fetch(`${supabaseUrl}/rest/v1/product_prices?${params}`, {
       headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' },
     });
-    if (!response.ok) return c.json({ success: false, error: `LoyaltyHub catalogue returned HTTP ${response.status}` }, 502);
+    if (!response.ok) {
+      const upstreamError = (await response.text().catch(() => '')).slice(0, 240);
+      return c.json({ success: false, error: `LoyaltyHub catalogue returned HTTP ${response.status}${upstreamError ? `: ${upstreamError}` : ''}` }, 502);
+    }
     const rows = await response.json();
     if (!Array.isArray(rows)) return c.json({ success: false, error: 'Invalid LoyaltyHub catalogue response' }, 502);
+    console.log(`[LoyaltyHub catalogue] fetched ${rows.length} rows at offset ${offset} (requested ${limit})`);
+    if (offset === 0 && rows.length === 0) {
+      return c.json({ success: false, error: 'LoyaltyHub catalogue returned no products for the first batch' }, 502);
+    }
 
-    let imported = 0;
-    for (const row of rows) {
+    const importItems = rows.map((row: any) => {
       const identity = `${row.retailer || 'retailer'}:${row.retailer_sku || row.name || 'product'}`;
-      await upsertProductCloud({
+      return {
         id: identity,
         barcode: row.barcode || undefined,
         name: row.name,
@@ -2273,9 +2418,9 @@ routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
           inStock: row.in_stock,
           importedAt: new Date().toISOString(),
         },
-      });
-      imported++;
-    }
+      };
+    });
+    const imported = await upsertProductCloudBatch(importItems);
     return c.json({ success: true, offset, discovered: rows.length, imported, hasMore: rows.length === limit, source: 'LoyaltyHub catalogue' });
   } catch (e: any) {
     console.error('[LoyaltyHub catalogue import] Error:', e?.message || e);
@@ -4164,7 +4309,7 @@ routes.get('/restaurant/menu/:merchantId', async (c) => {
 routes.post('/restaurant/orders', async (c) => {
   try {
     const body = await c.req.json();
-    const { merchantId, tableId, customerName, items, notes, paymentMethod } = body;
+    const { merchantId, tableId, customerName, customerEmail, customerPhone, items, notes, paymentMethod } = body;
     if (!merchantId || !tableId || !Array.isArray(items) || items.length === 0) {
       return c.json({ error: 'merchantId, tableId and items are required' }, 400);
     }
@@ -4178,6 +4323,8 @@ routes.post('/restaurant/orders', async (c) => {
     const orderId = `restaurant_order:${merchantId}:${Date.now()}`;
     const order = {
       id: orderId, merchantId, tableId, customerName: String(customerName || 'Guest').slice(0, 80),
+      customerEmail: String(customerEmail || '').trim().toLowerCase().slice(0, 160),
+      customerPhone: String(customerPhone || '').trim().slice(0, 40),
       items: verifiedItems, notes: String(notes || '').slice(0, 500),
       paymentMethod: ['Card on phone', 'Apple Pay', 'Online bank', 'At table'].includes(String(paymentMethod)) ? String(paymentMethod) : 'At table',
       total: verifiedItems.reduce((sum: number, item: any) => sum + item.price * item.qty, 0),
@@ -4243,6 +4390,7 @@ routes.post('/restaurant/orders/:id/approve', async (c) => {
     const kotId = `kot:${order.merchantId}:${Date.now()}`;
     const ticket = {
       id: kotId, merchantId: order.merchantId, tableId: order.tableId, tableName: order.tableId,
+      customerName: order.customerName, customerEmail: order.customerEmail, customerPhone: order.customerPhone,
       orderType: 'Dine-in', items: order.items.map((item: any) => ({ ...item, status: 'Pending' })),
       serverName: 'QR Guest', guestCount: 1, notes: order.notes, status: 'NEW', total: order.total,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), firedAt: null, completedAt: null, sourceOrderId: order.id,
@@ -4435,11 +4583,17 @@ routes.get('/bill/:merchantId/:tableId', async (c) => {
     const lineItems: any[] = [];
     let subtotal = 0;
     for (const kot of tableKots) {
-      for (const item of kot.items) {
-        subtotal += (item.price || 0) * (item.qty || 1);
+      for (const item of Array.isArray(kot.items) ? kot.items : []) {
+        // KOTs created by the POS use qty; QR orders may use quantity. Normalize
+        // both shapes so the bill always reflects the ordered quantity and price.
+        const qty = Math.max(1, Number(item.qty ?? item.quantity ?? 1) || 1);
+        const price = Math.max(0, Number(item.price ?? item.selling ?? 0) || 0);
+        const total = price * qty;
+        subtotal += total;
         lineItems.push({
-          name: item.name, qty: item.qty || 1, price: item.price || 0,
-          total: (item.price || 0) * (item.qty || 1),
+          id: item.id || item.name,
+          name: item.name || 'Unnamed item', qty, price,
+          total,
           course: item.course || 'Main', notes: item.notes || '',
           kotId: kot.id, kotTime: kot.createdAt
         });
@@ -4456,6 +4610,9 @@ routes.get('/bill/:merchantId/:tableId', async (c) => {
       serverName: table?.serverName || tableKots[0]?.serverName || 'Server',
       kots: tableKots.map((k: any) => ({ id: k.id, status: k.status, createdAt: k.createdAt, items: k.items.length })),
       lineItems, subtotal, kotCount: tableKots.length
+      ,customerName: tableKots.find((kot: any) => kot.customerName)?.customerName || '',
+      customerEmail: tableKots.find((kot: any) => kot.customerEmail)?.customerEmail || '',
+      customerPhone: tableKots.find((kot: any) => kot.customerPhone)?.customerPhone || ''
     });
   } catch (e: any) {
     console.error('[Bill] Aggregation error:', e?.message);
@@ -4468,7 +4625,7 @@ routes.get('/bill/:merchantId/:tableId', async (c) => {
 routes.post('/settle-bill', async (c) => {
   try {
     const body = await c.req.json();
-    const { merchantId, tableId, paymentMethod, amountTendered, tip, discount, cashierName, shiftId, lineItems, subtotal, guestCount } = body;
+    const { merchantId, tableId, paymentMethod, amountTendered, tip, discount, cashierName, shiftId, lineItems, subtotal, guestCount, customerName, customerEmail, customerPhone } = body;
     
     if (!merchantId) return c.json({ error: 'merchantId is required' }, 400);
 
@@ -4489,6 +4646,9 @@ routes.post('/settle-bill', async (c) => {
       change, cashierName: cashierName || 'Server',
       shiftId: shiftId || null, tableId: tableId || null,
       guestCount: guestCount || 1, status: 'Completed',
+      customerName: String(customerName || '').slice(0, 80),
+      customerEmail: String(customerEmail || '').trim().toLowerCase().slice(0, 160),
+      customerPhone: String(customerPhone || '').trim().slice(0, 40),
       createdAt: new Date().toISOString(),
       receiptNumber: `RB-${Date.now().toString(36).toUpperCase()}`
     };
@@ -4502,13 +4662,17 @@ routes.post('/settle-bill', async (c) => {
       const tableKots = (allKots || []).filter((k: any) => 
         k.tableId === tableId && k.status !== 'CANCELLED' && k.status !== 'SERVED'
       );
+      const kotKeys: string[] = [];
+      const kotValues: any[] = [];
       for (const kot of tableKots) {
         kot.status = 'SERVED';
         kot.completedAt = new Date().toISOString();
         kot.updatedAt = new Date().toISOString();
         kot.settledTxnId = txnId;
-        await kv.set(kot.id, kot);
+        kotKeys.push(kot.id);
+        kotValues.push(kot);
       }
+      if (kotKeys.length) await kv.mset(kotKeys, kotValues);
 
       // Free table -> Dirty
       const tables = (await kv.get(`tables:${merchantId}`)) || [];
@@ -4524,15 +4688,19 @@ routes.post('/settle-bill', async (c) => {
     }
 
     // Deduct stock
+    const stockItems = await kv.getByPrefix(`stock:${merchantId}:`);
+    const stockByName = new Map((stockItems || []).map((stockItem: any) => [stockItem.name, stockItem]));
+    const stockKeys: string[] = [];
+    const stockValues: any[] = [];
     for (const item of (lineItems || [])) {
-      const stockPrefix = `stock:${merchantId}:`;
-      const stockItems = await kv.getByPrefix(stockPrefix);
-      const stockItem = (stockItems || []).find((s: any) => s.name === item.name);
+      const stockItem = stockByName.get(item.name);
       if (stockItem && stockItem.stock !== undefined) {
         stockItem.stock = Math.max(0, stockItem.stock - (item.qty || 1));
-        await kv.set(`stock:${merchantId}:${stockItem.id}`, stockItem);
+        stockKeys.push(`stock:${merchantId}:${stockItem.id}`);
+        stockValues.push(stockItem);
       }
     }
+    if (stockKeys.length) await kv.mset(stockKeys, stockValues);
 
     await createAuditLog(merchantId, 'BILL_SETTLED', {
       txnId, tableId, total: grandTotal, paymentMethod, tip: tipAmount, items: lineItems?.length
@@ -4542,6 +4710,42 @@ routes.post('/settle-bill', async (c) => {
   } catch (e: any) {
     console.error('[SettleBill] Error:', e?.message);
     return c.json({ error: 'Failed to settle bill', details: e?.message }, 500);
+  }
+});
+
+routes.post('/restaurant/invoices/email', async (c) => {
+  try {
+    const body = await c.req.json();
+    const to = String(body.to || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return c.json({ success: false, error: 'A valid customer email is required' }, 400);
+    const transaction = body.transaction || {};
+    const lineItems = Array.isArray(body.lineItems) ? body.lineItems : [];
+    const lines = lineItems.map((item: any) => `${Number(item.qty || 1)} x ${item.name} — R${Number(item.total || 0).toFixed(2)}`).join('\n');
+    const subject = `Your Melrose Arch Kitchen invoice ${transaction.receiptNumber || transaction.id || ''}`.trim();
+    const message = [
+      `Thank you for dining with us${transaction.customerName ? `, ${transaction.customerName}` : ''}.`,
+      '',
+      `Receipt: ${transaction.receiptNumber || transaction.id || '—'}`,
+      `Payment: ${transaction.paymentMethod || '—'}`,
+      '',
+      lines,
+      '',
+      `Subtotal: R${Number(transaction.subtotal || 0).toFixed(2)}`,
+      `Tip: R${Number(transaction.tip || 0).toFixed(2)}`,
+      `Discount: R${Number(transaction.discount || 0).toFixed(2)}`,
+      `Total: R${Number(transaction.total ?? transaction.grandTotal ?? 0).toFixed(2)}`,
+      '',
+      'Melrose Arch Kitchen — Johannesburg',
+    ].join('\n');
+    const queued = await createEmailNotification(to, subject, message, {
+      type: 'restaurant_invoice',
+      merchantId: transaction.merchantId || body.merchantId || 'merchant:M4',
+      receiptNumber: transaction.receiptNumber || transaction.id,
+    });
+    return c.json({ success: true, queued: true, email: queued });
+  } catch (e: any) {
+    console.error('[Restaurant invoice email] Error:', e?.message || e);
+    return c.json({ success: false, error: 'Could not queue invoice email' }, 500);
   }
 });
 

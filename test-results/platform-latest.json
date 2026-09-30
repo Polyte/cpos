@@ -1,0 +1,78 @@
+{
+  "generatedAt": "2026-09-30T10:10:37.244Z",
+  "baseUrl": "https://tktryrmospxbbuylweui.supabase.co/functions/v1/make-server-69ad2d15",
+  "mode": "read-only smoke/performance",
+  "durationMs": 7692.41,
+  "passed": true,
+  "totals": {
+    "tests": 8,
+    "passed": 8,
+    "failed": 0
+  },
+  "results": [
+    {
+      "name": "API health",
+      "passed": true,
+      "durationMs": 1220.39,
+      "status": 200
+    },
+    {
+      "name": "Full catalogue count",
+      "passed": true,
+      "durationMs": 833.5,
+      "status": 200,
+      "count": 116618
+    },
+    {
+      "name": "Catalogue page 1",
+      "passed": true,
+      "durationMs": 649.77,
+      "status": 200,
+      "returned": 100,
+      "total": 116618,
+      "duplicates": 0
+    },
+    {
+      "name": "Catalogue page 2",
+      "passed": true,
+      "durationMs": 729.09,
+      "status": 200,
+      "returned": 100,
+      "total": 116618,
+      "duplicates": 0
+    },
+    {
+      "name": "Catalogue page beyond original 2,000-row window",
+      "passed": true,
+      "durationMs": 768.09,
+      "status": 200,
+      "returned": 100,
+      "total": 116618,
+      "duplicates": 0
+    },
+    {
+      "name": "Page boundary uniqueness",
+      "passed": true,
+      "durationMs": 1411.29,
+      "overlap": 0,
+      "firstCount": 100,
+      "secondCount": 100
+    },
+    {
+      "name": "Catalogue search pagination",
+      "passed": true,
+      "durationMs": 1437.34,
+      "status": 200,
+      "returned": 100,
+      "matches": 2260
+    },
+    {
+      "name": "Import authorization guard",
+      "passed": true,
+      "durationMs": 612.66,
+      "status": 403,
+      "message": "LoyaltyHub import requires Admin access"
+    }
+  ],
+  "fatal": null
+}

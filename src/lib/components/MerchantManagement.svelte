@@ -22,6 +22,11 @@
   let loading = $state(false);
   let merchants: any[] = $state([]);
   let selectedMerchant: any = $state(null);
+  let merchantSearch = $state('');
+  let merchantStatusFilter = $state<'all' | 'Active' | 'Pending' | 'Suspended'>('all');
+  let merchantTypeFilter = $state('all');
+  let merchantView = $state<'cards' | 'table'>('cards');
+  let merchantLogoUploading = $state(false);
   let auditLogs: any[] = $state([]);
   let terminals: any[] = $state([]);
   let loyaltyLogs: any[] = $state([]);
@@ -197,6 +202,45 @@
       console.error('[MerchantMgmt] loadMerchantDetail error:', e);
     } finally {
       detailLoading = false;
+    }
+  }
+
+  async function handleMerchantLogoUpload(event: Event) {
+    if (!selectedMerchant) return;
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Choose an image file for the merchant logo');
+      input.value = '';
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('Logo must be smaller than 2 MB');
+      input.value = '';
+      return;
+    }
+
+    merchantLogoUploading = true;
+    try {
+      const logoDataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('Could not read logo file'));
+        reader.readAsDataURL(file);
+      });
+      const nextConfig = { ...(merchantConfig || {}), logoUrl: logoDataUrl, logoName: file.name };
+      await api.updateMerchantConfig(selectedMerchant.id, 'config', nextConfig);
+      merchantConfig = nextConfig;
+      selectedMerchant = { ...selectedMerchant, logoUrl: logoDataUrl };
+      merchants = merchants.map(m => m.id === selectedMerchant.id ? { ...m, logoUrl: logoDataUrl } : m);
+      toast.success('Merchant logo saved');
+    } catch (e) {
+      console.error('[MerchantMgmt] handleMerchantLogoUpload error:', e);
+      toast.error('Logo could not be saved');
+    } finally {
+      merchantLogoUploading = false;
+      input.value = '';
     }
   }
 
@@ -553,6 +597,18 @@
 
   let filteredApps = $derived(appFilter === 'all' ? applications : applications.filter(a => a.status === appFilter));
 
+  let merchantTypes = $derived([...new Set(merchants.map(m => m.type || 'Retail').filter(Boolean))].sort());
+  let filteredMerchants = $derived(merchants.filter(m => {
+    const query = merchantSearch.trim().toLowerCase();
+    const matchesSearch = !query || [m.name, m.id, m.email, m.contactEmail, m.address, m.type].some(value => String(value || '').toLowerCase().includes(query));
+    const matchesStatus = merchantStatusFilter === 'all' || (m.status || 'Active') === merchantStatusFilter;
+    const matchesType = merchantTypeFilter === 'all' || (m.type || 'Retail') === merchantTypeFilter;
+    return matchesSearch && matchesStatus && matchesType;
+  }));
+  let activeMerchantCount = $derived(merchants.filter(m => (m.status || 'Active') === 'Active').length);
+  let pendingMerchantCount = $derived(merchants.filter(m => m.status === 'Pending').length);
+  let merchantTerminalTotal = $derived(merchants.reduce((sum, m) => sum + Number(m.terminalCount || 0), 0));
+
   function statusBadge(status: string) {
     switch (status) {
       case 'Pending': return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400';
@@ -591,17 +647,77 @@
   </div>
 
   {#if activeTab === 'merchants' && !selectedMerchant}
-    <div class="bg-white dark:bg-neutral-800/50 rounded-[48px] border border-neutral-200 dark:border-neutral-700 overflow-hidden shadow-sm">
-      <div class="p-8 border-b border-neutral-100 dark:border-neutral-700 bg-neutral-50/50 dark:bg-neutral-800/50 flex items-center justify-between">
-        <h3 class="text-xl font-black dark:text-neutral-100">Registered Merchant Fleet</h3>
-        <button onclick={loadMerchants} class="p-2 hover:bg-white dark:hover:bg-neutral-700 rounded-full transition-all border border-neutral-100 dark:border-neutral-700"><RefreshCw class="w-4 h-4 text-neutral-400" /></button>
+    <div class="space-y-6">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="p-5 bg-indigo-600 text-white rounded-[28px] shadow-xl shadow-indigo-200 dark:shadow-indigo-950/40 relative overflow-hidden">
+          <div class="absolute -right-5 -top-5 w-24 h-24 rounded-full bg-white/10"></div>
+          <p class="text-[9px] font-black uppercase tracking-[0.2em] text-indigo-100">Fleet pulse</p>
+          <p class="text-3xl font-black mt-2">{merchants.length}</p>
+          <p class="text-[10px] font-bold text-indigo-100 mt-1">merchant profiles in the network</p>
+        </div>
+        <div class="p-5 bg-white dark:bg-neutral-800/50 rounded-[28px] border border-neutral-200 dark:border-neutral-700">
+          <div class="flex items-center justify-between"><p class="text-[9px] font-black uppercase tracking-[0.2em] text-neutral-400">Live accounts</p><CheckCircle2 class="w-4 h-4 text-emerald-500" /></div>
+          <p class="text-3xl font-black text-neutral-900 dark:text-neutral-100 mt-2">{activeMerchantCount}</p>
+          <p class="text-[10px] font-bold text-emerald-500 mt-1">{pendingMerchantCount} awaiting review</p>
+        </div>
+        <div class="p-5 bg-white dark:bg-neutral-800/50 rounded-[28px] border border-neutral-200 dark:border-neutral-700">
+          <div class="flex items-center justify-between"><p class="text-[9px] font-black uppercase tracking-[0.2em] text-neutral-400">Provisioned terminals</p><Monitor class="w-4 h-4 text-indigo-500" /></div>
+          <p class="text-3xl font-black text-neutral-900 dark:text-neutral-100 mt-2">{merchantTerminalTotal}</p>
+          <p class="text-[10px] font-bold text-neutral-400 mt-1">across the merchant fleet</p>
+        </div>
       </div>
-      <div class="p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {#each merchants as m}
+
+      <div class="bg-white dark:bg-neutral-800/50 rounded-[48px] border border-neutral-200 dark:border-neutral-700 overflow-hidden shadow-sm">
+        <div class="p-8 border-b border-neutral-100 dark:border-neutral-700 bg-neutral-50/50 dark:bg-neutral-800/50">
+          <div class="flex flex-col xl:flex-row xl:items-center justify-between gap-5">
+            <div>
+              <h3 class="text-xl font-black dark:text-neutral-100">Registered merchant fleet</h3>
+              <p class="text-[10px] font-bold text-neutral-400 mt-1">Search by business, node, contact, or location</p>
+            </div>
+            <div class="flex flex-col sm:flex-row gap-3 w-full xl:w-auto">
+              <label class="relative min-w-0 sm:min-w-[260px]">
+                <span class="sr-only">Search merchants</span>
+                <Search class="w-4 h-4 text-neutral-400 absolute left-4 top-1/2 -translate-y-1/2" />
+                <input bind:value={merchantSearch} placeholder="Search merchants..." class="w-full pl-11 pr-4 py-3 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400" />
+              </label>
+              <label>
+                <span class="sr-only">Filter by status</span>
+                <select bind:value={merchantStatusFilter} class="w-full sm:w-auto py-3 px-4 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl text-xs font-black outline-none focus:ring-2 focus:ring-indigo-500/30">
+                  <option value="all">All statuses</option>
+                  <option value="Active">Active</option>
+                  <option value="Pending">Pending</option>
+                  <option value="Suspended">Suspended</option>
+                </select>
+              </label>
+              <label>
+                <span class="sr-only">Filter by type</span>
+                <select bind:value={merchantTypeFilter} class="w-full sm:w-auto py-3 px-4 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl text-xs font-black outline-none focus:ring-2 focus:ring-indigo-500/30">
+                  <option value="all">All types</option>
+                  {#each merchantTypes as type}<option value={type}>{type}</option>{/each}
+                </select>
+              </label>
+              <button onclick={loadMerchants} class="p-3 hover:bg-white dark:hover:bg-neutral-700 rounded-2xl transition-all border border-neutral-200 dark:border-neutral-700" title="Refresh merchants"><RefreshCw class="w-4 h-4 text-neutral-400" /></button>
+            </div>
+          </div>
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mt-5">
+            <div class="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-neutral-400"><Sliders class="w-3.5 h-3.5" /> Showing {filteredMerchants.length} of {merchants.length} merchants</div>
+            <div class="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-neutral-900 rounded-xl" aria-label="Merchant view mode">
+              <button onclick={() => merchantView = 'cards'} aria-label="Show merchant cards" aria-pressed={merchantView === 'cards'} class={`flex items-center gap-2 px-3 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${merchantView === 'cards' ? 'bg-white dark:bg-neutral-700 text-indigo-600 shadow-sm' : 'text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200'}`}>
+                <Store class="w-3.5 h-3.5" /> Cards
+              </button>
+              <button onclick={() => merchantView = 'table'} aria-label="Show merchants in a table" aria-pressed={merchantView === 'table'} class={`flex items-center gap-2 px-3 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${merchantView === 'table' ? 'bg-white dark:bg-neutral-700 text-indigo-600 shadow-sm' : 'text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200'}`}>
+                <TableIcon class="w-3.5 h-3.5" /> Table
+              </button>
+            </div>
+          </div>
+        </div>
+        {#if merchantView === 'cards'}
+        <div class="p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {#each filteredMerchants as m}
           <div key={m.id} onclick={() => loadMerchantDetail(m)} onkeydown={e => e.key === 'Enter' && loadMerchantDetail(m)} role="button" tabindex="0" class="p-8 bg-neutral-50 dark:bg-neutral-800 rounded-[40px] border border-neutral-100 dark:border-neutral-700 hover:border-indigo-300 transition-all group relative overflow-hidden cursor-pointer hover:shadow-xl">
             <div class="flex items-center justify-between mb-6">
-              <div class="w-12 h-12 bg-white dark:bg-neutral-700 rounded-2xl flex items-center justify-center text-2xl shadow-sm border border-neutral-100 dark:border-neutral-600 group-hover:bg-indigo-600 group-hover:text-white transition-all">
-                {m.type === 'Forecourt' ? '\u26FD' : m.type === 'Restaurant' ? '\uD83C\uDF7D' : m.type === 'Workshop' ? '\uD83D\uDD27' : '\uD83D\uDED2'}
+              <div class="w-12 h-12 bg-white dark:bg-neutral-700 rounded-2xl flex items-center justify-center text-2xl shadow-sm border border-neutral-100 dark:border-neutral-600 group-hover:bg-indigo-600 group-hover:text-white transition-all overflow-hidden">
+                {#if m.logoUrl}<img src={m.logoUrl} alt={`${m.name} logo`} class="w-full h-full object-contain p-2" />{:else}{m.type === 'Forecourt' ? '\u26FD' : m.type === 'Restaurant' ? '\uD83C\uDF7D' : m.type === 'Workshop' ? '\uD83D\uDD27' : '\uD83D\uDED2'}{/if}
               </div>
               <span class={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${m.status === 'Active' ? 'bg-emerald-100 text-emerald-600' : m.status === 'Pending' ? 'bg-amber-100 text-amber-600' : 'bg-red-100 text-red-600'}`}>
                 {m.status}
@@ -614,13 +730,61 @@
               <span>&bull;</span>
               <span class="flex items-center gap-1"><Monitor class="w-3 h-3" />{m.terminalCount || 'â€”'} terminals</span>
             </div>
+            <div class="mt-4 pt-4 border-t border-neutral-200/70 dark:border-neutral-700 flex items-center justify-between text-[9px] font-bold text-neutral-400">
+              <span>{m.email || m.contactEmail || 'No contact email'}</span>
+              <span class="text-emerald-500">{m.status === 'Active' ? 'Operational' : 'Needs attention'}</span>
+            </div>
             <div class="mt-5 flex items-center justify-between">
               <span class="text-[10px] font-black uppercase tracking-widest text-indigo-500 group-hover:text-indigo-600 transition-all">View Details</span>
               <ChevronRight class="w-4 h-4 text-neutral-300 group-hover:text-indigo-500 group-hover:translate-x-1 transition-all" />
             </div>
           </div>
         {/each}
+        {#if filteredMerchants.length === 0}
+          <div class="md:col-span-2 lg:col-span-3 py-20 text-center">
+            <div class="w-14 h-14 mx-auto rounded-2xl bg-neutral-100 dark:bg-neutral-700 flex items-center justify-center"><Search class="w-6 h-6 text-neutral-400" /></div>
+            <p class="mt-4 text-sm font-black text-neutral-700 dark:text-neutral-200">No merchants match those filters</p>
+            <p class="text-[10px] text-neutral-400 font-bold mt-1">Try a different search term or reset the filters.</p>
+          </div>
+        {/if}
       </div>
+        {:else}
+          <div class="p-4 sm:p-8 overflow-x-auto">
+            <table class="w-full min-w-[820px] text-left border-separate border-spacing-0">
+              <thead>
+                <tr>
+                  {#each ['Merchant', 'Type', 'Location', 'Terminals', 'Status', 'Joined', ''] as heading}
+                    <th class="px-4 py-4 border-b border-neutral-200 dark:border-neutral-700 text-[9px] font-black uppercase tracking-[0.18em] text-neutral-400">{heading}</th>
+                  {/each}
+                </tr>
+              </thead>
+              <tbody>
+                {#each filteredMerchants as m}
+                  <tr class="group cursor-pointer hover:bg-indigo-50/50 dark:hover:bg-indigo-900/10 transition-colors" onclick={() => loadMerchantDetail(m)} onkeydown={e => e.key === 'Enter' && loadMerchantDetail(m)} role="button" tabindex="0">
+                    <td class="px-4 py-4 border-b border-neutral-100 dark:border-neutral-800">
+                      <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-700 flex items-center justify-center overflow-hidden shrink-0">
+                          {#if m.logoUrl}<img src={m.logoUrl} alt={`${m.name} logo`} class="w-full h-full object-contain p-1.5" />{:else}<Store class="w-4 h-4 text-neutral-400" />{/if}
+                        </div>
+                        <div class="min-w-0"><p class="text-xs font-black text-neutral-900 dark:text-neutral-100 truncate max-w-[220px]">{m.name}</p><p class="text-[9px] font-mono text-neutral-400 mt-1">{m.id}</p></div>
+                      </div>
+                    </td>
+                    <td class="px-4 py-4 border-b border-neutral-100 dark:border-neutral-800"><span class="text-[10px] font-bold text-neutral-600 dark:text-neutral-300">{m.type || 'Retail'}</span></td>
+                    <td class="px-4 py-4 border-b border-neutral-100 dark:border-neutral-800"><span class="inline-flex items-center gap-1.5 text-[10px] font-bold text-neutral-500 dark:text-neutral-400 max-w-[180px] truncate"><MapPin class="w-3 h-3 shrink-0" />{m.address || 'No address recorded'}</span></td>
+                    <td class="px-4 py-4 border-b border-neutral-100 dark:border-neutral-800"><span class="inline-flex items-center gap-1.5 text-[10px] font-black text-neutral-700 dark:text-neutral-200"><Monitor class="w-3 h-3 text-indigo-500" />{m.terminalCount || 0}</span></td>
+                    <td class="px-4 py-4 border-b border-neutral-100 dark:border-neutral-800"><span class={`px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${m.status === 'Active' ? 'bg-emerald-100 text-emerald-600' : m.status === 'Pending' ? 'bg-amber-100 text-amber-600' : 'bg-red-100 text-red-600'}`}>{m.status || 'Active'}</span></td>
+                    <td class="px-4 py-4 border-b border-neutral-100 dark:border-neutral-800"><span class="text-[10px] font-bold text-neutral-500 dark:text-neutral-400 whitespace-nowrap">{m.createdAt ? new Date(m.createdAt).toLocaleDateString() : '—'}</span></td>
+                    <td class="px-4 py-4 border-b border-neutral-100 dark:border-neutral-800 text-right"><ChevronRight class="w-4 h-4 ml-auto text-neutral-300 group-hover:text-indigo-500 group-hover:translate-x-1 transition-all" /></td>
+                  </tr>
+                {/each}
+                {#if filteredMerchants.length === 0}
+                  <tr><td colspan="7" class="py-20 text-center"><Search class="w-6 h-6 mx-auto text-neutral-300" /><p class="mt-3 text-sm font-black text-neutral-700 dark:text-neutral-200">No merchants match those filters</p><p class="text-[10px] text-neutral-400 font-bold mt-1">Try a different search term or reset the filters.</p></td></tr>
+                {/if}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+    </div>
     </div>
   {/if}
 
@@ -760,6 +924,32 @@
                         <p class="text-xs font-bold text-neutral-900 dark:text-neutral-200 text-right max-w-[60%] truncate">{f.value}</p>
                       </div>
                     {/each}
+                  </div>
+
+                  <div class="p-6 rounded-[28px] border border-dashed border-indigo-200 dark:border-indigo-800 bg-indigo-50/50 dark:bg-indigo-900/10">
+                    <div class="flex items-start justify-between gap-4 mb-5">
+                      <div>
+                        <h5 class="text-xs font-black uppercase tracking-widest text-indigo-600 dark:text-indigo-400 flex items-center gap-2"><ImageIcon class="w-4 h-4" /> Merchant logo</h5>
+                        <p class="text-[10px] font-bold text-neutral-400 mt-1">Used on receipts, displays, and merchant-facing surfaces.</p>
+                      </div>
+                      <span class="text-[9px] font-black uppercase tracking-widest text-neutral-400">PNG / JPG · 2 MB</span>
+                    </div>
+                    <div class="flex items-center gap-5">
+                      <div class="w-20 h-20 rounded-2xl bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 flex items-center justify-center overflow-hidden shrink-0">
+                        {#if merchantConfig?.logoUrl || selectedMerchant.logoUrl}
+                          <img src={merchantConfig?.logoUrl || selectedMerchant.logoUrl} alt={`${selectedMerchant.name} logo`} class="w-full h-full object-contain p-2" />
+                        {:else}
+                          <Store class="w-8 h-8 text-neutral-300" />
+                        {/if}
+                      </div>
+                      <div>
+                        <label class={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${merchantLogoUploading ? 'opacity-60 pointer-events-none' : ''}`}>
+                          {#if merchantLogoUploading}<Loader2 class="w-3.5 h-3.5 animate-spin" /> Saving...{:else}<UploadCloud class="w-3.5 h-3.5" /> Upload logo{/if}
+                          <input type="file" accept="image/png,image/jpeg,image/webp" onchange={handleMerchantLogoUpload} class="sr-only" disabled={merchantLogoUploading} />
+                        </label>
+                        <p class="text-[10px] text-neutral-400 font-bold mt-2">Choose a square image for the cleanest display.</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
 

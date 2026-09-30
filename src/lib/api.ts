@@ -463,6 +463,26 @@ export const api = {
       return [];
     }
   },
+  getProductCloudCount: async () => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/count`, { headers: await getHeaders() });
+      return await safeJson(res, { count: 0 });
+    } catch (e) {
+      console.error('[API] product cloud count error:', e);
+      return { count: 0 };
+    }
+  },
+  getProductCloudPage: async (page = 1, limit = 100, query = '') => {
+    try {
+      const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+      if (query) params.set('query', query);
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/page?${params.toString()}`, { headers: await getHeaders() });
+      return await safeJson(res, { page, limit, total: 0, products: [] });
+    } catch (e) {
+      console.error('[API] product cloud page error:', e);
+      return { page, limit, total: 0, products: [] };
+    }
+  },
   enrichProductCloud: async (limit = 100) => {
     try {
       const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/enrich-barcodenest`, {
@@ -485,6 +505,7 @@ export const api = {
       }, 120000);
       return await safeJson(res, { success: false, error: 'LoyaltyHub import failed' });
     } catch (e: any) {
+      console.error('[API] LoyaltyHub catalogue import error:', e);
       return { success: false, error: e?.message || 'LoyaltyHub import failed' };
     }
   },
@@ -1447,7 +1468,7 @@ export const api = {
       return [];
     }
   },
-  submitRestaurantOrder: async (data: { merchantId: string; tableId: string; customerName?: string; items: any[]; notes?: string; paymentMethod?: string }) => {
+  submitRestaurantOrder: async (data: { merchantId: string; tableId: string; customerName?: string; customerEmail?: string; customerPhone?: string; items: any[]; notes?: string; paymentMethod?: string }) => {
     const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders`, { method: 'POST', headers: await getHeaders(), body: JSON.stringify(data) }, 30000);
     return await safeJson(res, { success: false, error: 'Could not submit order' });
   },
@@ -1457,6 +1478,15 @@ export const api = {
       return await safeJson(res, { success: false, error: 'Could not send payment request' });
     } catch (e: any) {
       return { success: false, error: e?.message || 'Could not send payment request' };
+    }
+  },
+  emailRestaurantInvoice: async (data: any) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/invoices/email`, { method: 'POST', headers: await getHeaders(), body: JSON.stringify(data) }, 30000);
+      return await safeJson(res, { success: false, error: 'Could not queue invoice email' });
+    } catch (e: any) {
+      console.error('[API] emailRestaurantInvoice error:', e);
+      return { success: false, error: e?.message || 'Could not queue invoice email' };
     }
   },
   createRestaurantRequest: async (data: { merchantId: string; tableId: string; type: string; note?: string }) => {
@@ -1589,7 +1619,7 @@ export const api = {
         method: 'POST',
         headers: await getHeaders(),
         body: JSON.stringify(data)
-      });
+      }, 60000);
       return await safeJson(res, { success: false });
     } catch (e) {
       console.error('[API] settleBill error:', e);

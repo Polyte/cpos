@@ -7,7 +7,8 @@
     "build": "vite build",
     "dev": "vite",
     "import:loyaltyhub": "node scripts/import-loyaltyhub.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:platform": "node scripts/test-platform.mjs"
   },
   "dependencies": {
     "@types/leaflet": "^1.9.14",

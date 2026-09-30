@@ -1235,7 +1235,7 @@ export const api = {
       return [];
     }
   },
-  submitRestaurantOrder: async (data: { merchantId: string; tableId: string; customerName?: string; items: any[]; notes?: string }) => {
+  submitRestaurantOrder: async (data: { merchantId: string; tableId: string; customerName?: string; customerEmail?: string; customerPhone?: string; items: any[]; notes?: string }) => {
     const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders`, { method: 'POST', headers: await getHeaders(), body: JSON.stringify(data) }, 30000);
     return await safeJson(res, { success: false, error: 'Could not submit order' });
   },
@@ -1361,7 +1361,7 @@ export const api = {
         method: 'POST',
         headers: await getHeaders(),
         body: JSON.stringify(data)
-      });
+      }, 60000);
       return await safeJson(res, { success: false });
     } catch (e) {
       console.error('[API] settleBill error:', e);
