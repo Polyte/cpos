@@ -12,14 +12,14 @@ const app = new Hono();
 
 // 1. GLOBAL CORS - ZERO-TRUST POLICY
 app.use('*', cors({
-  origin: (origin) => {
-    // In production, you'd strictly whitelist origins.
-    // For this environment, we'll allow all but enforce security headers later.
-    return origin || '*';
-  },
+  // The frontend sends credentials with `omit`, so wildcard CORS is valid and
+  // avoids rejecting preview/deployment origins that change between builds.
+  origin: '*',
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: [
     'Content-Type', 
+    'Accept',
+    'Origin',
     'Authorization', 
     'X-Idempotency-Key', 
     'X-Forensic-Node-ID', 
@@ -38,7 +38,7 @@ app.options('*', (c) => {
     headers: {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Idempotency-Key, X-Forensic-Node-ID, X-Forensic-Session-ID, Range, User-Agent',
+      'Access-Control-Allow-Headers': 'Content-Type, Accept, Origin, Authorization, X-Idempotency-Key, X-Forensic-Node-ID, X-Forensic-Session-ID, Range, User-Agent',
       'Access-Control-Max-Age': '86400',
     },
   });
@@ -48,7 +48,10 @@ app.options('*', (c) => {
 app.use('*', logger(console.log));
 app.onError((err, c) => {
   console.log('[CRITICAL SERVER ERROR]', err?.message || err);
-  return c.json({ error: 'Internal server error', details: err?.message || 'Unknown error' }, 500);
+  return c.json({ error: 'Internal server error', details: err?.message || 'Unknown error' }, 500, {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept, Origin, Authorization, X-Idempotency-Key, X-Forensic-Node-ID, X-Forensic-Session-ID',
+  });
 });
 
 // 4. PREFIX & ROUTING
@@ -111,7 +114,11 @@ const cache = {
       const keys = [
         'merchants_list',
         'tx_list:all',
-        'stock_list:all'
+        'stock_list:all',
+        'stock_list:merchant:M1',
+        'stock_list:merchant:M2',
+        'stock_list:merchant:M3',
+        'stock_list:merchant:M4'
       ];
       // Also invalidate merchant-specific keys if we track them, but for now, clear global aggregations
       for (const k of keys) await kv.del(`cache:${k}`);
@@ -372,7 +379,81 @@ async function createEmailNotification(
     };
     await kv.set(id, record);
     console.log(`[Email] Queued notification to ${to}: "${subject}"`);
-    return record;
+  return record;
+}
+
+function internalBarcode(item: any): string {
+  const seed = String(item.id || item.sku || item.name || 'product');
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) hash = ((hash * 31) + seed.charCodeAt(i)) >>> 0;
+  return `290${String(hash % 1_000_000_000).padStart(9, '0')}`;
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
+}
+
+async function upsertProductCloud(item: any) {
+  const barcode = String(item.barcode || internalBarcode(item)).trim();
+  const key = `product_cloud:${barcode}`;
+  const existing = await kv.get(key);
+  const merchantIds = Array.from(new Set([
+    ...(existing?.merchantIds || []),
+    ...(item.merchantId ? [item.merchantId] : [])
+  ]));
+  await kv.set(key, {
+    ...(existing || {}),
+    id: existing?.id || `cloud:${barcode}`,
+    barcode,
+    name: item.name || existing?.name || 'Unnamed product',
+    brand: item.brand || existing?.brand || '',
+    category: item.category || existing?.category || 'General',
+    unit: item.unit || existing?.unit || 'Unit',
+    price: item.price ?? item.startingPrice ?? item.loyaltyhub?.price ?? item.loyaltyhub?.startingPrice ?? existing?.price ?? null,
+    imageUrl: item.imageUrl || item.image || existing?.imageUrl || '',
+    sku: item.sku || existing?.sku || '',
+    canonicalGtin: item.canonicalGtin || existing?.canonicalGtin || '',
+    description: item.description || existing?.description || '',
+    quantity: item.quantity ?? existing?.quantity ?? null,
+    ingredients: item.ingredients || existing?.ingredients || '',
+    allergens: item.allergens || existing?.allergens || [],
+    nutrition: item.nutrition || existing?.nutrition || {},
+    countries: item.countries || existing?.countries || [],
+    barcodenest: item.barcodenest || existing?.barcodenest || null,
+    loyaltyhub: item.loyaltyhub || existing?.loyaltyhub || null,
+    merchantIds,
+    source: item.source || existing?.source || 'Clinton POS inventory',
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+// Demo catalog artwork. These are generic, non-branded Unsplash photos so the
+// seeded POS is visually useful without requiring local image storage.
+function productImage(item: any): string {
+  const name = String(item.name || '').toLowerCase();
+  const imageId = name.includes('milk') ? 'photo-1550583724-b2692b85b150'
+    : name.includes('bread') || name.includes('loaf') ? 'photo-1509440159596-0249088772ff'
+    : name.includes('egg') ? 'photo-1582722872445-44dc5f7e3c8f'
+    : name.includes('cheese') ? 'photo-1486297678162-eb2a19b0a32d'
+    : name.includes('rice') ? 'photo-1586201375761-83865001e31c'
+    : name.includes('oil') ? 'photo-1474979266404-7eaacbcd87c5'
+    : name.includes('chicken') ? 'photo-1604503468506-a8da13d82791'
+    : name.includes('burger') ? 'photo-1568901346375-23c9450c58cd'
+    : name.includes('pizza') ? 'photo-1574071318508-1cdbab80d002'
+    : name.includes('coffee') || name.includes('espresso') ? 'photo-1495474472287-4d71bcdd2085'
+    : name.includes('beer') || name.includes('lager') ? 'photo-1515003197210-e0cd71810b5f'
+    : item.category === 'Food' ? 'photo-1544025162-d76694265947'
+    : item.category === 'Beverage' ? 'photo-1544145945-f90425340c7e'
+    : item.category === 'Workshop' ? 'photo-1530124566582-a618bc2615dc'
+    : 'photo-1542838132-92c53300491e';
+  return `https://images.unsplash.com/${imageId}?auto=format&fit=crop&w=640&q=82`;
 }
 
 // --- Routes ---
@@ -458,7 +539,63 @@ routes.post('/seed', async (c) => {
       { id: 'R13', merchantId: 'merchant:M4', name: 'Calamari Strips', category: 'Food', selling: 115.00, cost: 45.00, stock: 30, barcode: 'REST-CAL-01', unit: 'Plate', velocity: 'Medium', course: 'Starter' },
       { id: 'R14', merchantId: 'merchant:M4', name: 'Grilled Chicken Salad', category: 'Food', selling: 145.00, cost: 55.00, stock: 35, barcode: 'REST-GCS-01', unit: 'Plate', velocity: 'Medium', course: 'Main' }
     ];
-    for (const item of stockItems) await kv.set(`stock:${item.merchantId}:${item.id}`, item);
+    // Keep the seeded retail tenant recognisably South African and Makro-style
+    // (bulk pantry, beverages, snacks and household essentials).
+    const retailOverrides: Record<string, any> = {
+      P1: { name: 'Fair Cape UHT Full Cream Milk 1L', selling: 19.95, cost: 15, unit: 'Carton' },
+      P2: { name: 'Sasko Premium Sliced Bread', selling: 19.95, cost: 13, unit: 'Loaf' },
+      P5: { name: 'Nulaid Large Eggs 6-Pack', selling: 34.95, cost: 25, unit: 'Pack' },
+      P6: { name: 'Parmalat Processed Cheese 900g', selling: 104.95, cost: 78, unit: 'Pack' },
+      P7: { name: 'Sparletta Creme Soda 2L', selling: 19.95, cost: 13, unit: 'Bottle' },
+      P8: { name: 'Sunflower Oil 750ml', selling: 39.95, cost: 28, unit: 'Bottle' },
+      P9: { name: 'Tastic Parboiled Rice 2kg', selling: 34.95, cost: 25, unit: 'Bag' },
+      P10: { name: 'OMO Auto Washing Powder 2kg', selling: 89.95, cost: 65, unit: 'Box' },
+      P11: { name: 'ARO 1-Ply Toilet Tissue 24-Pack', selling: 115.95, cost: 82, unit: 'Pack' },
+      P12: { name: 'Rainbow Frozen Chicken Portions 2kg', selling: 84.99, cost: 62, unit: 'Bag' },
+      P13: { id: 'P13', merchantId: 'merchant:M1', name: 'Nestlé Milo Malt Drink 500g', category: 'Beverages', selling: 89.95, cost: 67, stock: 45, barcode: '6001234567909', unit: 'Tin' },
+      P14: { id: 'P14', merchantId: 'merchant:M1', name: 'Freshpak Rooibos Tea 80s', category: 'Beverages', selling: 59.25, cost: 42, stock: 60, barcode: '6001234567910', unit: 'Box' },
+      P15: { id: 'P15', merchantId: 'merchant:M1', name: 'Simba Ghost Pops Maize Snack', category: 'Snacks', selling: 12.95, cost: 8, stock: 120, barcode: '6001234567911', unit: 'Bag' },
+      P16: { id: 'P16', merchantId: 'merchant:M1', name: 'Doritos Sweet Chilli 120g', category: 'Snacks', selling: 20.95, cost: 14, stock: 100, barcode: '6001234567912', unit: 'Bag' },
+    };
+    const tenantOverrides: Record<string, any> = {
+      F5: { name: 'Red Bull Energy Drink 250ml', category: 'Convenience', selling: 19.95, cost: 13, unit: 'Can' },
+      F6: { name: 'Energade Blueberry 500ml', category: 'Convenience', selling: 19.95, cost: 12, unit: 'Bottle' },
+      F7: { name: 'Steak & Cheese Pie', category: 'Hot Food', selling: 35, cost: 18, unit: 'Each' },
+      F11: { id: 'F11', merchantId: 'merchant:M2', name: 'Liqui-Fruit Red Grape Juice 300ml', category: 'Convenience', selling: 14.95, cost: 9, stock: 100, barcode: 'CONV-LF-01', unit: 'Bottle' },
+      F12: { id: 'F12', merchantId: 'merchant:M2', name: 'Simba Original Chips 120g', category: 'Snacks', selling: 22.95, cost: 15, stock: 80, barcode: 'CONV-SM-01', unit: 'Bag' },
+      F13: { id: 'F13', merchantId: 'merchant:M2', name: 'Bakers Tennis Biscuits 200g', category: 'Snacks', selling: 25.95, cost: 17, stock: 75, barcode: 'CONV-BK-01', unit: 'Pack' },
+      W1: { name: 'SEB Corolla Spin-on Oil Filter', selling: 120, cost: 65 },
+      W3: { name: 'NGK Spark Plug Set (4)', selling: 320, cost: 180 },
+      W7: { name: 'Ingle 652MF 80Ah Car Battery', selling: 1583, cost: 1100 },
+      W8: { id: 'W8', merchantId: 'merchant:M3', name: 'Castrol GTX 20W-50 Motor Oil 5L', category: 'Workshop', selling: 599, cost: 420, stock: 12, barcode: 'PART-OIL-01', unit: 'Bottle' },
+      W9: { id: 'W9', merchantId: 'merchant:M3', name: 'Bosch AeroEco Wiper Blade 14in', category: 'Workshop', selling: 230, cost: 160, stock: 18, barcode: 'PART-WIP-01', unit: 'Each' },
+      W10: { id: 'W10', merchantId: 'merchant:M3', name: 'Tolsen Tyre Pressure Gauge 170 PSI', category: 'Workshop', selling: 399, cost: 280, stock: 10, barcode: 'PART-TPG-01', unit: 'Each' },
+      R1: { name: 'Classic Eggs Benedict', selling: 74, cost: 28 },
+      R2: { name: 'Chicken Burger', selling: 74, cost: 28 },
+      R5: { name: 'Beef Burger', selling: 99, cost: 38 },
+      R6: { name: 'Smashed Avo & Poached Egg', selling: 74, cost: 28 },
+      R9: { name: 'Bottomless Filter Coffee', selling: 49, cost: 12, unit: 'Cup' },
+      R12: { name: 'Cappuccino', selling: 45, cost: 12, unit: 'Cup' },
+      R15: { id: 'R15', merchantId: 'merchant:M4', name: 'Chicken Mayo Toasted Sandwich', category: 'Food', selling: 68, cost: 25, stock: 35, barcode: 'REST-CS-02', unit: 'Plate' },
+      R16: { id: 'R16', merchantId: 'merchant:M4', name: 'Famous Giant Muffin', category: 'Food', selling: 52, cost: 18, stock: 25, barcode: 'REST-MP-02', unit: 'Each' },
+      R17: { id: 'R17', merchantId: 'merchant:M4', name: 'Rooibos Tea', category: 'Beverage', selling: 30, cost: 8, stock: 120, barcode: 'REST-RT-01', unit: 'Cup' },
+      R18: { id: 'R18', merchantId: 'merchant:M4', name: 'Caribbean Mocha', category: 'Beverage', selling: 59, cost: 18, stock: 100, barcode: 'REST-CM-01', unit: 'Cup' },
+      R19: { id: 'R19', merchantId: 'merchant:M4', name: 'Guava & Grapefruit Fruity Fizz', category: 'Beverage', selling: 66, cost: 20, stock: 80, barcode: 'REST-GF-01', unit: 'Glass' },
+      R20: { id: 'R20', merchantId: 'merchant:M4', name: 'Triple Chocolate Brownie', category: 'Food', selling: 40, cost: 14, stock: 30, barcode: 'REST-TB-01', unit: 'Each' },
+      R21: { id: 'R21', merchantId: 'merchant:M4', name: 'Buffalo Chicken & Blue Cheese Eggs Benedict', category: 'Food', selling: 84, cost: 32, stock: 25, barcode: 'REST-BC-01', unit: 'Plate' },
+      R22: { id: 'R22', merchantId: 'merchant:M4', name: 'Muesli & Yoghurt Pot', category: 'Food', selling: 69, cost: 24, stock: 25, barcode: 'REST-MY-01', unit: 'Pot' },
+    };
+    const seededStockItems = stockItems
+      .map((item: any) => {
+        const override = item.merchantId === 'merchant:M1' ? retailOverrides[item.id] : tenantOverrides[item.id];
+        return override ? { ...item, ...override } : item;
+      })
+      .concat(Object.values({ ...retailOverrides, ...tenantOverrides }).filter((item: any) => !stockItems.some((existing: any) => existing.id === item.id)));
+    for (const item of seededStockItems) {
+      const stockItem = { ...item, barcode: item.barcode || internalBarcode(item), image: item.image || productImage(item) };
+      await kv.set(`stock:${item.merchantId}:${item.id}`, stockItem);
+      await upsertProductCloud(stockItem);
+    }
 
     const password = 'password123';
     const accounts: { email: string; name: string; role: string; merchantId: string | null; profile: string | null }[] = [
@@ -2058,10 +2195,266 @@ routes.get('/stock', async (c) => {
   return c.json(result);
 });
 
+routes.get('/product-cloud', async (c) => {
+  const authUser = c.get('authUser');
+  if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Product Cloud access denied' }, 403);
+  }
+  const query = (c.req.query('query') || '').trim().toLowerCase();
+  const responseLimit = Math.min(Math.max(Number(c.req.query('limit')) || 500, 1), 2000);
+  const products = await kv.getByPrefix('product_cloud:');
+  const filtered = (products || []).filter((product: any) => {
+    if (!query) return true;
+    return [product.barcode, product.name, product.brand, product.sku]
+      .some((value) => String(value || '').toLowerCase().includes(query));
+  });
+  return c.json(filtered.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name))).slice(0, responseLimit));
+});
+
+routes.delete('/product-cloud/:barcode', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Product Cloud deletion requires Admin access' }, 403);
+  const barcode = String(c.req.param('barcode') || '').trim();
+  if (!barcode) return c.json({ error: 'Barcode required' }, 400);
+  await kv.del(`product_cloud:${barcode}`);
+  return c.json({ success: true, barcode });
+});
+
+// Import additional catalogue rows from LoyaltyHub's public product-price
+// catalogue. The products page is a featured slice; the catalogue endpoint
+// contains the broader retailer inventory and is paged to keep each request
+// within Edge Function execution limits.
+routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'LoyaltyHub import requires Admin access' }, 403);
+
+  const body = await c.req.json().catch(() => ({}));
+  const offset = Math.max(Number(body.offset) || 0, 0);
+  const limit = Math.min(Math.max(Number(body.limit) || 250, 1), 500);
+  try {
+    const js = await (await fetch('https://loyaltyhub.co.za/_next/static/chunks/app/search/page-64f7718c8e79f3f1.js')).text();
+    const client = js.match(/createBrowserClient\)\("(https:\/\/[^" ]+)","([^"]+)"\)/);
+    if (!client) return c.json({ success: false, error: 'LoyaltyHub catalogue configuration unavailable' }, 502);
+    const [, supabaseUrl, supabaseKey] = client;
+    const params = new URLSearchParams({
+      select: 'retailer,retailer_sku,barcode,name,brand,price,currency,unit_size,category,image_url,product_url,in_stock',
+      offset: String(offset),
+      limit: String(limit),
+    });
+    const response = await fetch(`${supabaseUrl}/rest/v1/product_prices?${params}`, {
+      headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' },
+    });
+    if (!response.ok) return c.json({ success: false, error: `LoyaltyHub catalogue returned HTTP ${response.status}` }, 502);
+    const rows = await response.json();
+    if (!Array.isArray(rows)) return c.json({ success: false, error: 'Invalid LoyaltyHub catalogue response' }, 502);
+
+    let imported = 0;
+    for (const row of rows) {
+      const identity = `${row.retailer || 'retailer'}:${row.retailer_sku || row.name || 'product'}`;
+      await upsertProductCloud({
+        id: identity,
+        barcode: row.barcode || undefined,
+        name: row.name,
+        brand: row.brand,
+        imageUrl: row.image_url,
+        sku: row.retailer_sku,
+        price: row.price,
+        category: row.category || 'LoyaltyHub Catalogue',
+        unit: row.unit_size || 'Unit',
+        source: 'LoyaltyHub',
+        loyaltyhub: {
+          retailer: row.retailer,
+          retailerSku: row.retailer_sku,
+          price: row.price,
+          currency: row.currency,
+          unitSize: row.unit_size,
+          category: row.category,
+          productUrl: row.product_url,
+          inStock: row.in_stock,
+          importedAt: new Date().toISOString(),
+        },
+      });
+      imported++;
+    }
+    return c.json({ success: true, offset, discovered: rows.length, imported, hasMore: rows.length === limit, source: 'LoyaltyHub catalogue' });
+  } catch (e: any) {
+    console.error('[LoyaltyHub catalogue import] Error:', e?.message || e);
+    return c.json({ success: false, error: 'LoyaltyHub catalogue import failed' }, 502);
+  }
+});
+
+routes.post('/product-cloud/import-loyaltyhub', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'LoyaltyHub import requires Admin access' }, 403);
+
+  const bearer = Deno.env.get('LOYALTYHUB_BEARER_TOKEN');
+  if (!bearer) return c.json({ success: false, error: 'LoyaltyHub is not configured on the server' }, 503);
+
+  const body = await c.req.json().catch(() => ({}));
+  const limit = Math.min(Math.max(Number(body.limit) || 1000, 1), 2000);
+  try {
+    const response = await fetch('https://loyaltyhub.co.za/products', {
+      headers: { Authorization: `Bearer ${bearer}`, Accept: 'text/html,application/xhtml+xml' },
+    });
+    if (!response.ok) return c.json({ success: false, error: `LoyaltyHub returned HTTP ${response.status}` }, 502);
+    const html = await response.text();
+    const products: any[] = [];
+    const productPattern = /<a[^>]+href="(\/products\/[^"?#]+-b(\d{8,14}))"[\s\S]*?<img[^>]+src="([^"]+)"[\s\S]*?<p[^>]*class="[^"]*font-medium[^"]*"[^>]*>([\s\S]*?)<\/p>[\s\S]*?<span[^>]*>(R[0-9.,]+)<\/span>/g;
+    let match: RegExpExecArray | null;
+    while ((match = productPattern.exec(html)) && products.length < limit) {
+      const [, path, barcode, imageUrl, rawName, startingPrice] = match;
+      products.push({ barcode, name: decodeHtml(rawName.replace(/<[^>]+>/g, '')), imageUrl: decodeHtml(imageUrl), startingPrice, productUrl: `https://loyaltyhub.co.za${path}` });
+    }
+
+    let imported = 0;
+    for (const product of products) {
+      await upsertProductCloud({
+        ...product,
+        price: product.startingPrice,
+        category: 'LoyaltyHub Catalogue',
+        source: 'LoyaltyHub',
+        barcodenest: undefined,
+        loyaltyhub: { productUrl: product.productUrl, startingPrice: product.startingPrice, importedAt: new Date().toISOString() },
+      });
+      imported++;
+    }
+    return c.json({ success: true, discovered: products.length, imported, source: 'LoyaltyHub' });
+  } catch (e: any) {
+    console.error('[LoyaltyHub import] Error:', e?.message || e);
+    return c.json({ success: false, error: 'LoyaltyHub import failed' }, 502);
+  }
+});
+
+routes.post('/product-cloud/enrich-barcodenest', async (c) => {
+  const authUser = c.get('authUser');
+  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Product Cloud enrichment requires Admin access' }, 403);
+
+  const apiKey = Deno.env.get('BARCODENEST_API_KEY');
+  if (!apiKey) return c.json({ success: false, error: 'BarcodeNest is not configured on the server' }, 503);
+
+  const body = await c.req.json().catch(() => ({}));
+  const limit = Math.min(Math.max(Number(body.limit) || 100, 1), 100);
+  const stock = await kv.getByPrefix('stock:');
+  const requestedBarcodes = Array.isArray(body.barcodes) ? body.barcodes : (stock || []).map((item: any) => item.barcode);
+  const barcodes = Array.from(new Set(requestedBarcodes
+    .map((barcode: any) => String(barcode || '').trim())
+    .filter((barcode: string) => /^\d{8,14}$/.test(barcode))))
+    .slice(0, limit);
+
+  let enriched = 0;
+  let notFound = 0;
+  let failed = 0;
+  const details: any[] = [];
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const upstream = await fetch('https://api.barcodenest.com/v1/products/batch', {
+      method: 'POST',
+      headers: { 'X-API-Key': apiKey, Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ barcodes }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    const raw = await upstream.text();
+    let batch: any = {};
+    try { batch = JSON.parse(raw); } catch {}
+    if (!upstream.ok || !Array.isArray(batch.results)) {
+      return c.json({ success: false, requested: barcodes.length, enriched: 0, notFound: 0, failed: barcodes.length, error: 'BarcodeNest batch lookup failed' }, 502);
+    }
+
+    for (const result of batch.results) {
+      const barcode = String(result.barcode || '').trim();
+      if (!result.found || !result.product) {
+        notFound++;
+        details.push({ barcode, status: 'not_found' });
+        continue;
+      }
+
+      const product = result.product || {};
+      const existing = await kv.get(`product_cloud:${barcode}`);
+      await upsertProductCloud({
+        ...(existing || {}),
+        barcode,
+        name: product.name || existing?.name || `Barcode ${barcode}`,
+        brand: product.brand || existing?.brand || '',
+        category: existing?.category || (Array.isArray(product.categories) ? product.categories[0] : product.categories) || 'General',
+        imageUrl: product.image_url || existing?.imageUrl || '',
+        canonicalGtin: result.canonical_gtin || existing?.canonicalGtin || '',
+        description: product.description || existing?.description || '',
+        quantity: product.quantity ?? existing?.quantity ?? null,
+        ingredients: product.ingredients || existing?.ingredients || '',
+        allergens: product.allergens || existing?.allergens || [],
+        nutrition: product.nutrition || existing?.nutrition || {},
+        countries: product.countries || existing?.countries || [],
+        barcodenest: { product, source: result.source || null, fetchedAt: new Date().toISOString() },
+        source: result.source?.name ? `BarcodeNest / ${result.source.name}` : 'BarcodeNest',
+        merchantId: existing?.merchantIds?.[0] || null,
+      });
+      enriched++;
+      details.push({ barcode, status: 'enriched', name: product.name || null });
+    }
+  } catch (e: any) {
+    failed = barcodes.length;
+    details.push({ status: 'failed', error: e?.message || 'request failed' });
+  }
+
+  return c.json({ success: true, requested: barcodes.length, enriched, notFound, failed, details });
+});
+
+routes.get('/product-lookup', async (c) => {
+  const barcode = c.req.query('barcode') || '';
+  if (!/^\d{8,14}$/.test(barcode)) {
+    return c.json({ success: false, error: 'Enter a valid numeric barcode (8–14 digits)' }, 400);
+  }
+
+  const apiKey = Deno.env.get('BARCODENEST_API_KEY');
+  if (!apiKey) {
+    console.error('[product-lookup] BARCODENEST_API_KEY is not configured');
+    return c.json({ success: false, error: 'Barcode lookup is not configured on the server' }, 503);
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const upstream = await fetch(`https://api.barcodenest.com/v1/products/${encodeURIComponent(barcode)}`, {
+      headers: { 'X-API-Key': apiKey, Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const raw = await upstream.text();
+    let data: any = {};
+    try { data = JSON.parse(raw); } catch {}
+
+    if (upstream.status === 404) {
+      return c.json({ success: false, found: false, error: data?.error?.message || 'Product not found' }, 404);
+    }
+    if (!upstream.ok) {
+      console.error('[product-lookup] BarcodeNest status:', upstream.status);
+      return c.json({ success: false, error: 'Barcode provider unavailable' }, 502);
+    }
+
+    return c.json({
+      success: true,
+      found: data.found !== false,
+      barcode: data.barcode || barcode,
+      canonical_gtin: data.canonical_gtin || null,
+      product: data.product || null,
+      source: data.source || null,
+    });
+  } catch (e: any) {
+    console.error('[product-lookup] Upstream error:', e?.message || e);
+    return c.json({ success: false, error: 'Barcode provider timed out or could not be reached' }, 504);
+  }
+});
+
 routes.post('/stock', async (c) => {
   const body = await c.req.json();
   const itemId = body.id || crypto.randomUUID();
-  await kv.set(`stock:${body.merchantId}:${itemId}`, { ...body, id: itemId });
+  const stockItem = { ...body, id: itemId, barcode: body.barcode || internalBarcode({ ...body, id: itemId }) };
+  await kv.set(`stock:${body.merchantId}:${itemId}`, stockItem);
+  await upsertProductCloud(stockItem);
   
   await cache.invalidateMerchant(body.merchantId);
   return c.json({ success: true, id: itemId });
@@ -3716,6 +4109,158 @@ routes.post('/migrate-user-pins', async (c) => {
   }
 });
 
+// --- Restaurant: QR menu and guest orders ---
+
+function generatedRestaurantDescription(item: any) {
+  if (item.description) return item.description;
+  const name = String(item.name || 'Menu item');
+  const lower = name.toLowerCase();
+  const descriptions: Array<[string, string]> = [
+    ['ribeye', 'A beautifully grilled ribeye with a rich, savoury crust and tender centre.'],
+    ['linguine', 'Silky linguine tossed with a fragrant sauce and generous seasonal toppings.'],
+    ['caesar', 'Crisp greens, savoury dressing, and fresh toppings finished with a light crunch.'],
+    ['soup', 'A comforting bowl of the day’s warming soup, prepared fresh for the table.'],
+    ['burger', 'A juicy, generously layered burger served with fresh toppings and a toasted bun.'],
+    ['pizza', 'A golden, oven-baked pizza with a crisp edge, rich sauce, and melted cheese.'],
+    ['fondant', 'A warm chocolate fondant with a soft, indulgent centre and deep cocoa flavour.'],
+    ['brulee', 'A silky vanilla custard finished with a delicate crackling caramel top.'],
+    ['brownie', 'A rich, fudgy chocolate brownie made for an indulgent sweet finish.'],
+    ['calamari', 'Tender calamari strips with a light golden coating and a bright, fresh finish.'],
+    ['salad', 'Fresh seasonal ingredients brought together for a crisp, satisfying plate.'],
+    ['eggs benedict', 'Poached eggs and generous toppings layered over a toasted base with a silky sauce.'],
+    ['muffin', 'A freshly baked, generously sized muffin with a soft crumb and comforting sweetness.'],
+    ['cappuccino', 'Smooth espresso and velvety steamed milk finished with a soft layer of foam.'],
+    ['espresso', 'A short, aromatic espresso with a rich crema and deep roasted notes.'],
+    ['coffee', 'A smooth, freshly brewed coffee with a warm aroma and balanced finish.'],
+    ['mocha', 'A silky coffee blend with chocolate richness and a smooth, comforting finish.'],
+    ['rooibos', 'A naturally caffeine-free rooibos tea with gentle warmth and subtle sweetness.'],
+    ['lager', 'A refreshing, crisp lager served chilled for an easy-drinking finish.'],
+    ['wine', 'A carefully selected wine pour with bright character and a smooth finish.'],
+    ['water', 'Chilled sparkling water to refresh the palate between courses.'],
+    ['fizz', 'A bright, refreshing fruit fizz with lively citrus notes and gentle sparkle.'],
+  ];
+  const match = descriptions.find(([term]) => lower.includes(term));
+  if (match) return match[1];
+  if (String(item.course || item.category).toLowerCase().includes('dessert')) return `A sweet, beautifully presented ${name.toLowerCase()} to finish your meal.`;
+  if (String(item.course || item.category).toLowerCase().includes('beverage')) return `A refreshing ${name.toLowerCase()}, prepared and served with care.`;
+  return `A carefully prepared ${name.toLowerCase()} made with quality ingredients and served fresh from our kitchen.`;
+}
+
+routes.get('/restaurant/menu/:merchantId', async (c) => {
+  try {
+    const merchantId = c.req.param('merchantId');
+    const stock = await kv.getByPrefix(`stock:${merchantId}:`);
+    return c.json((stock || []).filter((item: any) => Number(item.stock ?? 1) > 0).map((item: any) => ({
+      id: item.id, name: item.name, category: item.category, course: item.course,
+      price: Number(item.selling ?? item.price ?? 0), image: item.image || item.imageUrl || '',
+      description: generatedRestaurantDescription(item),
+    })));
+  } catch (e: any) {
+    console.error('[Restaurant menu] Error:', e?.message || e);
+    return c.json({ error: 'Failed to load restaurant menu' }, 500);
+  }
+});
+
+routes.post('/restaurant/orders', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { merchantId, tableId, customerName, items, notes, paymentMethod } = body;
+    if (!merchantId || !tableId || !Array.isArray(items) || items.length === 0) {
+      return c.json({ error: 'merchantId, tableId and items are required' }, 400);
+    }
+    const stock = await kv.getByPrefix(`stock:${merchantId}:`);
+    const verifiedItems = items.map((requested: any) => {
+      const item = (stock || []).find((candidate: any) => candidate.id === requested.id);
+      if (!item) throw new Error(`Menu item not found: ${requested.id}`);
+      const qty = Math.max(1, Math.min(20, Number(requested.quantity) || 1));
+      return { id: item.id, name: item.name, qty, price: Number(item.selling ?? item.price ?? 0), notes: String(requested.notes || ''), course: item.course || item.category || 'Main' };
+    });
+    const orderId = `restaurant_order:${merchantId}:${Date.now()}`;
+    const order = {
+      id: orderId, merchantId, tableId, customerName: String(customerName || 'Guest').slice(0, 80),
+      items: verifiedItems, notes: String(notes || '').slice(0, 500),
+      paymentMethod: ['Card on phone', 'Apple Pay', 'Online bank', 'At table'].includes(String(paymentMethod)) ? String(paymentMethod) : 'At table',
+      total: verifiedItems.reduce((sum: number, item: any) => sum + item.price * item.qty, 0),
+      status: 'PENDING_APPROVAL', source: 'QR_MENU', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    await kv.set(orderId, order);
+    await createAuditLog(merchantId, 'QR_ORDER_RECEIVED', { orderId, tableId, items: verifiedItems.length });
+    return c.json({ success: true, order: { id: order.id, status: order.status, total: order.total } });
+  } catch (e: any) {
+    console.error('[Restaurant order] Create error:', e?.message || e);
+    return c.json({ error: e?.message || 'Failed to submit restaurant order' }, 400);
+  }
+});
+
+routes.get('/restaurant/orders', async (c) => {
+  try {
+    const merchantId = c.req.query('merchantId');
+    const orders = await kv.getByPrefix(merchantId ? `restaurant_order:${merchantId}:` : 'restaurant_order:');
+    const status = c.req.query('status');
+    return c.json((orders || []).filter((order: any) => !status || order.status === status).sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+  } catch (e: any) {
+    return c.json({ error: 'Failed to load restaurant orders' }, 500);
+  }
+});
+
+routes.post('/restaurant/orders/:id/payment-request', async (c) => {
+  try {
+    const orderId = decodeURIComponent(c.req.param('id'));
+    const order = await kv.get(orderId);
+    if (!order) return c.json({ error: 'Restaurant order not found' }, 404);
+    const body = await c.req.json();
+    const allowed = ['Card on phone', 'Apple Pay', 'Online bank', 'At table'];
+    order.paymentMethod = allowed.includes(String(body.paymentMethod)) ? String(body.paymentMethod) : 'At table';
+    order.paymentStatus = order.paymentMethod === 'At table' ? 'PAY_AT_TABLE' : 'PAYMENT_REQUESTED';
+    order.updatedAt = new Date().toISOString();
+    await kv.set(order.id, order);
+    await createAuditLog(order.merchantId, 'RESTAURANT_PAYMENT_REQUESTED', { orderId: order.id, tableId: order.tableId, paymentMethod: order.paymentMethod });
+    return c.json({ success: true, order });
+  } catch (e: any) {
+    return c.json({ success: false, error: e?.message || 'Failed to request payment' }, 500);
+  }
+});
+
+routes.post('/restaurant/requests', async (c) => {
+  try {
+    const body = await c.req.json();
+    if (!body.merchantId || !body.tableId || !body.type) return c.json({ success: false, error: 'merchantId, tableId and type are required' }, 400);
+    const request = { id: `restaurant_request:${body.merchantId}:${Date.now()}`, merchantId: body.merchantId, tableId: body.tableId, type: String(body.type), note: String(body.note || '').slice(0, 300), status: 'OPEN', createdAt: new Date().toISOString() };
+    await kv.set(request.id, request);
+    await createAuditLog(request.merchantId, 'RESTAURANT_REQUEST_CREATED', request);
+    return c.json({ success: true, request });
+  } catch (e: any) {
+    return c.json({ success: false, error: e?.message || 'Failed to create restaurant request' }, 500);
+  }
+});
+
+routes.post('/restaurant/orders/:id/approve', async (c) => {
+  try {
+    const orderId = decodeURIComponent(c.req.param('id'));
+    const order = await kv.get(orderId);
+    if (!order) return c.json({ error: 'Restaurant order not found' }, 404);
+    if (order.status !== 'PENDING_APPROVAL') return c.json({ error: 'Order is no longer awaiting approval' }, 409);
+    const kotId = `kot:${order.merchantId}:${Date.now()}`;
+    const ticket = {
+      id: kotId, merchantId: order.merchantId, tableId: order.tableId, tableName: order.tableId,
+      orderType: 'Dine-in', items: order.items.map((item: any) => ({ ...item, status: 'Pending' })),
+      serverName: 'QR Guest', guestCount: 1, notes: order.notes, status: 'NEW', total: order.total,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), firedAt: null, completedAt: null, sourceOrderId: order.id,
+    };
+    await kv.set(kotId, ticket);
+    order.status = 'APPROVED'; order.kotId = kotId; order.updatedAt = new Date().toISOString();
+    await kv.set(order.id, order);
+    const tables = (await kv.get(`tables:${order.merchantId}`)) || [];
+    const table = tables.find((item: any) => item.id === order.tableId);
+    if (table) { table.status = 'Occupied'; table.currentOrderId = kotId; table.updatedAt = new Date().toISOString(); await kv.set(`tables:${order.merchantId}`, tables); }
+    await createAuditLog(order.merchantId, 'QR_ORDER_APPROVED', { orderId: order.id, kotId, tableId: order.tableId });
+    return c.json({ success: true, order, kot: ticket });
+  } catch (e: any) {
+    console.error('[Restaurant order] Approval error:', e?.message || e);
+    return c.json({ error: 'Failed to approve restaurant order' }, 500);
+  }
+});
+
 // --- Restaurant: Table Management ---
 
 routes.get('/tables/:merchantId', async (c) => {
@@ -3880,9 +4425,9 @@ routes.get('/bill/:merchantId/:tableId', async (c) => {
     
     const prefix = `kot:${merchantId}:`;
     const allKots = await kv.getByPrefix(prefix);
-    // Only show active KOTs (not cancelled or already served/settled)
+    // Keep served items on the bill until settlement; only settled tickets leave it.
     const tableKots = (allKots || []).filter((k: any) => 
-      k.tableId === tableId && k.status !== 'CANCELLED' && k.status !== 'SERVED'
+      k.tableId === tableId && k.status !== 'CANCELLED' && !k.settledTxnId
     ).sort((a: any, b: any) => 
       new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
     );

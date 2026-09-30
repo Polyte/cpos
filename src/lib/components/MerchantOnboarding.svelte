@@ -200,7 +200,7 @@
   function hasErr(field: string) { return !!errors[field]; }
 
   function fieldClass(field: string) {
-    return `w-full px-6 py-4 bg-neutral-50 dark:bg-neutral-800 text-white border rounded-2xl font-bold outline-none focus:ring-2 transition-all ${hasErr(field) ? 'border-red-300 focus:ring-red-400 bg-red-50/30 dark:bg-red-950/20' : 'border-neutral-100 dark:border-neutral-700 focus:ring-indigo-500'}`;
+    return `w-full px-6 py-4 bg-neutral-50 dark:bg-neutral-800 text-neutral-900 dark:text-white border rounded-2xl font-bold outline-none focus:ring-2 transition-all ${hasErr(field) ? 'border-red-300 focus:ring-red-400 bg-red-50/30 dark:bg-red-950/20' : 'border-neutral-100 dark:border-neutral-700 focus:ring-indigo-500'}`;
   }
 
   function stepValid(s: number) {
@@ -221,8 +221,8 @@
   ];
 </script>
 
-<div class="min-h-screen bg-neutral-50 dark:bg-neutral-950 flex flex-col items-center justify-center p-6">
-  <div class="max-w-4xl w-full bg-white dark:bg-neutral-900 rounded-[48px] shadow-2xl border border-neutral-100 dark:border-neutral-700 overflow-hidden flex flex-col md:flex-row min-h-[700px] max-h-[90vh]">
+<div class="onboarding-shell min-h-screen bg-neutral-50 dark:bg-neutral-950 flex flex-col items-center justify-center p-3 sm:p-6">
+  <div class="max-w-4xl w-full bg-white dark:bg-neutral-900 rounded-[24px] sm:rounded-[48px] shadow-2xl border border-neutral-100 dark:border-neutral-700 overflow-hidden flex flex-col md:flex-row min-h-[700px] md:max-h-[90vh]">
     <!-- Sidebar Nav -->
     <div class="w-full md:w-72 bg-neutral-900 p-10 text-white flex flex-col justify-between">
       <div class="space-y-8">
@@ -261,7 +261,7 @@
     </div>
 
     <!-- Form Area -->
-    <div class="flex-1 flex flex-col p-12 overflow-y-auto">
+    <div class="onboarding-form flex-1 flex flex-col p-5 sm:p-12 overflow-y-auto">
       {#key step}
         <!-- STEP 1: Identity -->
         {#if step === 1}
@@ -270,7 +270,7 @@
               <h2 class="text-3xl font-black tracking-tight text-white">Primary Account Holder</h2>
               <p class="text-neutral-300 font-medium">Define the root administrator for this merchant node.</p>
             </div>
-            <div class="grid grid-cols-2 gap-6">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div class="space-y-2">
                 <label class="text-[10px] font-black uppercase tracking-widest text-white">First Name <span class="text-red-400">*</span></label>
                 <input class={fieldClass('account.firstName')} value={formData.account.firstName} oninput={e => formData = {...formData, account: {...formData.account, firstName: e.target.value}}} onblur={() => markTouched('account.firstName')} placeholder="John" />
@@ -352,7 +352,7 @@
                   <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['businessInfo.legalName']}</p>
                 {/if}
               </div>
-              <div class="grid grid-cols-2 gap-6">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="space-y-2">
                   <label class="text-[10px] font-black uppercase tracking-widest text-white">Business Type <span class="text-red-400">*</span></label>
                   <select class={fieldClass('businessInfo.type')} value={formData.businessInfo.type} onchange={e => formData = {...formData, businessInfo: {...formData.businessInfo, type: e.target.value}}}>
@@ -413,7 +413,7 @@
                   <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['banking.bankName']}</p>
                 {/if}
               </div>
-              <div class="grid grid-cols-2 gap-6">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="space-y-2">
                   <label class="text-[10px] font-black uppercase tracking-widest text-white">Account Number <span class="text-red-400">*</span></label>
                   <input class={fieldClass('banking.accountNumber')} value={formData.banking.accountNumber} oninput={e => formData = {...formData, banking: {...formData.banking, accountNumber: e.target.value.replace(/\D/g, '')}}} onblur={() => markTouched('banking.accountNumber')} placeholder="1234567890" inputmode="numeric" />
@@ -439,7 +439,7 @@
               <h2 class="text-3xl font-black tracking-tight text-white">Compliance Documents</h2>
               <p class="text-neutral-300 font-medium">Upload required verification documents (KYC/FICA).</p>
             </div>
-            <div class="grid grid-cols-2 gap-6">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
               {#each [{ id: 'cipc', label: 'Company Registration (CIPC)', desc: 'COR 14.3', required: true }, { id: 'id', label: 'Director ID / Passport', desc: 'Certified Copy', required: true }, { id: 'bank', label: 'Bank Confirmation Letter', desc: '< 3 Months Old', required: false }, { id: 'proof', label: 'Proof of Address', desc: 'Utility Bill / Lease', required: false }] as doc}
                 {@const uploaded = formData.documents.find((d: any) => d.type === doc.id)}
                 {@const docErr = errors[`doc.${doc.id}`]}
@@ -459,7 +459,7 @@
                       <div>
                         <p class="font-black text-sm mb-1 {uploaded ? 'text-emerald-700 dark:text-emerald-400' : docErr ? 'text-red-600' : 'text-neutral-900 dark:text-neutral-200'}">
                           {uploaded ? 'Uploaded Successfully' : doc.label}
-                          {doc.required && !uploaded && <span class="text-red-400"> *</span>}
+                          {#if doc.required && !uploaded}<span class="text-red-400"> *</span>{/if}
                         </p>
                         <p class="text-[10px] font-bold text-neutral-400 uppercase tracking-wide">{uploaded ? uploaded.name : doc.desc}</p>
                         {#if docErr}<p class="text-[9px] font-bold text-red-500 mt-1 flex items-center gap-1"><AlertCircle class="w-3 h-3" /> {docErr}</p>{/if}
@@ -510,7 +510,7 @@
                   </div>
                 {/if}
               </div>
-              <div class="grid grid-cols-2 gap-6">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="space-y-2">
                   <label class="text-[10px] font-black uppercase tracking-widest text-white">Currency</label>
                   <select class="w-full px-6 py-4 bg-neutral-50 dark:bg-neutral-800 text-white border border-neutral-100 dark:border-neutral-700 rounded-2xl font-bold outline-none focus:ring-2 focus:ring-indigo-500" value={formData.location.currency} onchange={e => formData = {...formData, location: {...formData.location, currency: e.target.value}}}>
@@ -545,7 +545,7 @@
                   <button onclick={() => formData = {...formData, hardware: {...formData.hardware, terminalCount: formData.hardware.terminalCount + 1}}} class="w-12 h-12 bg-neutral-100 dark:bg-neutral-800 rounded-xl flex items-center justify-center font-black text-xl hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-all">+</button>
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-4">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <button onclick={() => formData = {...formData, hardware: {...formData.hardware, hardwareOption: 'own'}}} class="p-6 rounded-[32px] border-2 transition-all text-left {formData.hardware.hardwareOption === 'own' ? 'border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/30' : 'border-neutral-100 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800'}">
                   <Smartphone class="w-8 h-8 mb-4 {formData.hardware.hardwareOption === 'own' ? 'text-indigo-600' : 'text-neutral-400'}" />
                   <p class="font-black text-sm text-neutral-900 dark:text-neutral-100">BYOD (Compatible)</p>
@@ -577,7 +577,7 @@
                 <span class="px-2.5 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 rounded-full text-[9px] font-black uppercase tracking-widest">Save 20%</span>
               {/if}
             </div>
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 {#each [{ id: 'kiosk', name: 'Kiosk / Start-up', icon: Zap, monthlyPrice: 0, annualPrice: 0, afterTrial: 'from R299/mo', color: 'amber', features: ['1 Terminal', 'Basic POS', 'Up to 50 SKUs', 'Email Support', 'Basic Reports', 'Standard Settlement (T+2)', 'Single Location'], limitations: ['No API access', 'No multi-branch', 'No batch settlement'] }, { id: 'standard', name: 'Standard Retail', icon: Star, monthlyPrice: 899, annualPrice: 719, color: 'indigo', popular: true, features: ['Up to 5 Terminals', 'Full POS + Kitchen Display', 'Up to 2 000 SKUs', 'Priority Support', 'Advanced Analytics', 'Fast Settlement (T+1)', 'Multi-Location (3 branches)', 'Batch Settlement', 'Customer Loyalty'], limitations: ['No API access', 'No white-label'] }, { id: 'multi', name: 'Multi-Branch', icon: Crown, monthlyPrice: 1999, annualPrice: 1599, color: 'neutral', features: ['Unlimited Terminals', 'All POS Features', 'Unlimited SKUs', 'Dedicated Account Manager', 'Real-time Analytics + Forensic Ledger', 'Same-day Settlement (T+0)', 'Unlimited Locations', 'API Access & Webhooks', 'White-Label Options', 'Custom Integrations', 'SLA Guarantee'], limitations: [] }] as plan}
                 {@const isSelected = formData.plan.selected === plan.id}
                 {@const price = formData.plan.billing === 'annual' ? plan.annualPrice : plan.monthlyPrice}
@@ -651,7 +651,7 @@
                     <div class="w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all {formData.agreements[agg.id] ? 'bg-indigo-600 border-indigo-600' : errors[errKey] ? 'border-red-400' : 'border-neutral-300 dark:border-neutral-600'}">
                       {#if formData.agreements[agg.id]}<CheckCircle2 class="w-4 h-4 text-white" />{/if}
                     </div>
-                    <p class="text-xs font-bold text-white">{agg.label}{agg.required && <span class="text-red-400"> *</span>}</p>
+                    <p class="text-xs font-bold text-white">{agg.label}{#if agg.required}<span class="text-red-400"> *</span>{/if}</p>
                   </div>
                   {#if errors[errKey]}
                     <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors[errKey]}</p>
@@ -736,3 +736,28 @@
     </div>
   </div>
 </div>
+
+<style>
+  /* Keep the form legible on the light card; the legacy classes used white
+     text on light inputs, which made onboarding appear blank or unusable. */
+  .onboarding-form :global(h2),
+  .onboarding-form :global(label),
+  .onboarding-form :global(input),
+  .onboarding-form :global(select),
+  .onboarding-form :global(textarea) {
+    color: #171717 !important;
+  }
+
+  .onboarding-form :global(input::placeholder),
+  .onboarding-form :global(textarea::placeholder) {
+    color: #737373 !important;
+  }
+
+  :global(.dark) .onboarding-form :global(h2),
+  :global(.dark) .onboarding-form :global(label),
+  :global(.dark) .onboarding-form :global(input),
+  :global(.dark) .onboarding-form :global(select),
+  :global(.dark) .onboarding-form :global(textarea) {
+    color: #f5f5f5 !important;
+  }
+</style>

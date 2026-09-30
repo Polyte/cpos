@@ -3,12 +3,129 @@ import { supabase } from './auth';
 
 export { supabase };
 
-const project = projectId || 'ujgeqvqkvxuhrciketvo';
+const project = projectId || 'tktryrmospxbbuylweui';
 const ANON_KEY = publicAnonKey;
 
 // Backend server URL — this points to the Hono edge function (now backed by Turso)
 const BASE_URL = `https://${project}.supabase.co/functions/v1/make-server-69ad2d15`;
-const SERVER_URL = BASE_URL;
+// Keep the deployed endpoint as the default, but allow local/staging deployments
+// to provide their own endpoint without changing source code.
+const SERVER_URL = (import.meta.env.VITE_API_URL || BASE_URL).replace(/\/$/, '');
+
+const LOCAL_DEMO_USERS: Record<string, { name: string; role: string; profile: string; merchantId: string | null }> = {
+  'admin@roxton.com': { name: 'Clinton Matos', role: 'Admin', profile: 'Retail', merchantId: null },
+  'retail.manager@roxton.com': { name: 'Sarah Ndlovu', role: 'Manager', profile: 'Retail', merchantId: 'merchant:M1' },
+  'retail.supervisor@roxton.com': { name: 'James Botha', role: 'Supervisor', profile: 'Retail', merchantId: 'merchant:M1' },
+  'retail.cashier@roxton.com': { name: 'Thandi Moyo', role: 'Cashier', profile: 'Retail', merchantId: 'merchant:M1' },
+  'retail.stock@roxton.com': { name: 'David Patel', role: 'StockController', profile: 'Retail', merchantId: 'merchant:M1' },
+  'manager@roxton.com': { name: 'Sarah Ndlovu', role: 'Manager', profile: 'Retail', merchantId: 'merchant:M1' },
+  'supervisor@roxton.com': { name: 'James Botha', role: 'Supervisor', profile: 'Retail', merchantId: 'merchant:M1' },
+  'cashier@roxton.com': { name: 'Thandi Moyo', role: 'Cashier', profile: 'Retail', merchantId: 'merchant:M1' },
+  'fuel.manager@roxton.com': { name: 'Pieter van Wyk', role: 'Manager', profile: 'Forecourt', merchantId: 'merchant:M2' },
+  'fuel.supervisor@roxton.com': { name: 'Nomsa Khumalo', role: 'Supervisor', profile: 'Forecourt', merchantId: 'merchant:M2' },
+  'fuel.attendant@roxton.com': { name: 'Sipho Dlamini', role: 'Cashier', profile: 'Forecourt', merchantId: 'merchant:M2' },
+  'workshop.manager@roxton.com': { name: 'Johan Kruger', role: 'Manager', profile: 'Workshop', merchantId: 'merchant:M3' },
+  'workshop.mechanic@roxton.com': { name: 'Bongani Nkosi', role: 'StockController', profile: 'Workshop', merchantId: 'merchant:M3' },
+  'workshop.reception@roxton.com': { name: 'Lisa Chen', role: 'Cashier', profile: 'Workshop', merchantId: 'merchant:M3' },
+  'chef@roxton.com': { name: 'Marco Rossi', role: 'Manager', profile: 'Restaurant', merchantId: 'merchant:M4' },
+  'restaurant.supervisor@roxton.com': { name: 'Ayesha Khan', role: 'Supervisor', profile: 'Restaurant', merchantId: 'merchant:M4' },
+  'waiter@roxton.com': { name: 'Luke van der Berg', role: 'Cashier', profile: 'Restaurant', merchantId: 'merchant:M4' },
+};
+
+const image = (id: string) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=640&q=82`;
+
+const LOCAL_DEMO_STOCK = [
+  { id: 'P1', merchantId: 'merchant:M1', name: 'Fair Cape UHT Full Cream Milk 1L', category: 'Dairy', selling: 19.95, cost: 15, stock: 100, barcode: '6001234567890', unit: 'Carton', image: image('photo-1550583724-b2692b85b150') },
+  { id: 'P2', merchantId: 'merchant:M1', name: 'Sasko Premium Sliced Bread', category: 'Bakery', selling: 19.95, cost: 13, stock: 50, barcode: '6009876543210', unit: 'Loaf', image: image('photo-1509440159596-0249088772ff') },
+  { id: 'P5', merchantId: 'merchant:M1', name: 'Nulaid Large Eggs 6-Pack', category: 'Dairy', selling: 34.95, cost: 25, stock: 80, barcode: '6001234567901', unit: 'Pack', image: image('photo-1582722872445-44dc5f7e3c8f') },
+  { id: 'P6', merchantId: 'merchant:M1', name: 'Parmalat Processed Cheese 900g', category: 'Dairy', selling: 104.95, cost: 78, stock: 25, barcode: '6001234567902', unit: 'Pack', image: image('photo-1486297678162-eb2a19b0a32d') },
+  { id: 'P7', merchantId: 'merchant:M1', name: 'Sparletta Creme Soda 2L', category: 'Beverages', selling: 19.95, cost: 13, stock: 200, barcode: '6001234567903', unit: 'Bottle', image: image('photo-1544145945-f90425340c7e') },
+  { id: 'P8', merchantId: 'merchant:M1', name: 'Sunflower Oil 750ml', category: 'Cooking', selling: 39.95, cost: 28, stock: 90, barcode: '6001234567904', unit: 'Bottle', image: image('photo-1474979266404-7eaacbcd87c5') },
+  { id: 'P9', merchantId: 'merchant:M1', name: 'Tastic Parboiled Rice 2kg', category: 'Dry Goods', selling: 34.95, cost: 25, stock: 70, barcode: '6001234567905', unit: 'Bag', image: image('photo-1586201375761-83865001e31c') },
+  { id: 'P10', merchantId: 'merchant:M1', name: 'OMO Auto Washing Powder 2kg', category: 'Household', selling: 89.95, cost: 65, stock: 45, barcode: '6001234567906', unit: 'Box', image: image('photo-1583947215259-38e31be8751f') },
+  { id: 'P11', merchantId: 'merchant:M1', name: 'ARO 1-Ply Toilet Tissue 24-Pack', category: 'Household', selling: 115.95, cost: 82, stock: 55, barcode: '6001234567907', unit: 'Pack', image: image('photo-1584556812952-905ffd0c611a') },
+  { id: 'P12', merchantId: 'merchant:M1', name: 'Rainbow Frozen Chicken Portions 2kg', category: 'Meat', selling: 84.99, cost: 62, stock: 40, barcode: '6001234567908', unit: 'Bag', image: image('photo-1604503468506-a8da13d82791') },
+  { id: 'P13', merchantId: 'merchant:M1', name: 'Nestlé Milo Malt Drink 500g', category: 'Beverages', selling: 89.95, cost: 67, stock: 45, barcode: '6001234567909', unit: 'Tin', image: image('photo-1544145945-f90425340c7e') },
+  { id: 'P14', merchantId: 'merchant:M1', name: 'Freshpak Rooibos Tea 80s', category: 'Beverages', selling: 59.25, cost: 42, stock: 60, barcode: '6001234567910', unit: 'Box', image: image('photo-1544787219-7f47ccb76574') },
+  { id: 'P15', merchantId: 'merchant:M1', name: 'Simba Ghost Pops Maize Snack', category: 'Snacks', selling: 12.95, cost: 8, stock: 120, barcode: '6001234567911', unit: 'Bag', image: image('photo-1621939514649-280e2aa2f4a') },
+  { id: 'P16', merchantId: 'merchant:M1', name: 'Doritos Sweet Chilli 120g', category: 'Snacks', selling: 20.95, cost: 14, stock: 100, barcode: '6001234567912', unit: 'Bag', image: image('photo-1621447504864-d8686e12698c') },
+  { id: 'P3', merchantId: 'merchant:M2', name: '95 Unleaded', category: 'Fuel', selling: 23.4, cost: 18.5, stock: 50000, barcode: 'FUEL-95', unit: 'Litre', image: image('photo-1545454675-3531b543be5d') },
+  { id: 'F1', merchantId: 'merchant:M2', name: '93 Unleaded', category: 'Fuel', selling: 22.9, cost: 18.1, stock: 40000, barcode: 'FUEL-93', unit: 'Litre', image: image('photo-1545454675-3531b543be5d') },
+  { id: 'F2', merchantId: 'merchant:M2', name: 'Diesel 50ppm', category: 'Fuel', selling: 21.8, cost: 17.2, stock: 60000, barcode: 'FUEL-D50', unit: 'Litre', image: image('photo-1545454675-3531b543be5d') },
+  { id: 'F3', merchantId: 'merchant:M2', name: 'Castrol GTX 5W-30 1L', category: 'Lubricants', selling: 189, cost: 130, stock: 50, barcode: 'LUB-CGX-01', unit: 'Bottle', image: image('photo-1530124566582-a618bc2615dc') },
+  { id: 'F5', merchantId: 'merchant:M2', name: 'Red Bull Energy Drink 250ml', category: 'Convenience', selling: 19.95, cost: 13, stock: 120, barcode: 'CONV-ED-01', unit: 'Can', image: image('photo-1622543925917-763c34d1a86e') },
+  { id: 'F6', merchantId: 'merchant:M2', name: 'Energade Blueberry 500ml', category: 'Convenience', selling: 19.95, cost: 12, stock: 200, barcode: 'CONV-BW-01', unit: 'Bottle', image: image('photo-1564419320461-6870880221ad') },
+  { id: 'F7', merchantId: 'merchant:M2', name: 'Steak & Cheese Pie', category: 'Hot Food', selling: 35, cost: 18, stock: 30, barcode: 'HF-PIE-01', unit: 'Each', image: image('photo-1601050690597-df0568f70950') },
+  { id: 'F11', merchantId: 'merchant:M2', name: 'Liqui-Fruit Red Grape Juice 300ml', category: 'Convenience', selling: 14.95, cost: 9, stock: 100, barcode: 'CONV-LF-01', unit: 'Bottle', image: image('photo-1544145945-f90425340c7e') },
+  { id: 'F12', merchantId: 'merchant:M2', name: 'Simba Original Chips 120g', category: 'Snacks', selling: 22.95, cost: 15, stock: 80, barcode: 'CONV-SM-01', unit: 'Bag', image: image('photo-1621447504864-d8686e12698c') },
+  { id: 'F13', merchantId: 'merchant:M2', name: 'Bakers Tennis Biscuits 200g', category: 'Snacks', selling: 25.95, cost: 17, stock: 75, barcode: 'CONV-BK-01', unit: 'Pack', image: image('photo-1558961363-fa8fdf82db35') },
+  { id: 'W1', merchantId: 'merchant:M3', name: 'SEB Corolla Spin-on Oil Filter', category: 'Workshop', selling: 120, cost: 65, stock: 30, barcode: 'PART-OF-01', unit: 'Each', image: image('photo-1486262715619-67b85e0b08d3') },
+  { id: 'W3', merchantId: 'merchant:M3', name: 'NGK Spark Plug Set (4)', category: 'Workshop', selling: 320, cost: 180, stock: 20, barcode: 'PART-SP-01', unit: 'Set', image: image('photo-1530124566582-a618bc2615dc') },
+  { id: 'W7', merchantId: 'merchant:M3', name: 'Ingle 652MF 80Ah Car Battery', category: 'Workshop', selling: 1583, cost: 1100, stock: 6, barcode: 'PART-BAT-01', unit: 'Each', image: image('photo-1609521263047-f8f205293f24') },
+  { id: 'W8', merchantId: 'merchant:M3', name: 'Castrol GTX 20W-50 Motor Oil 5L', category: 'Workshop', selling: 599, cost: 420, stock: 12, barcode: 'PART-OIL-01', unit: 'Bottle', image: image('photo-1530124566582-a618bc2615dc') },
+  { id: 'W9', merchantId: 'merchant:M3', name: 'Bosch AeroEco Wiper Blade 14in', category: 'Workshop', selling: 230, cost: 160, stock: 18, barcode: 'PART-WIP-01', unit: 'Each', image: image('photo-1530124566582-a618bc2615dc') },
+  { id: 'W10', merchantId: 'merchant:M3', name: 'Tolsen Tyre Pressure Gauge 170 PSI', category: 'Workshop', selling: 399, cost: 280, stock: 10, barcode: 'PART-TPG-01', unit: 'Each', image: image('photo-1530124566582-a618bc2615dc') },
+  { id: 'R1', merchantId: 'merchant:M4', name: 'Classic Eggs Benedict', category: 'Food', selling: 74, cost: 28, stock: 40, barcode: 'REST-RIB-01', unit: 'Plate', image: image('photo-1544025162-d76694265947') },
+  { id: 'R2', merchantId: 'merchant:M4', name: 'Chicken Burger', category: 'Food', selling: 74, cost: 28, stock: 35, barcode: 'REST-PL-01', unit: 'Plate', image: image('photo-1551183053-bf91a1d81141') },
+  { id: 'R5', merchantId: 'merchant:M4', name: 'Beef Burger', category: 'Food', selling: 99, cost: 38, stock: 45, barcode: 'REST-BB-01', unit: 'Plate', image: image('photo-1568901346375-23c9450c58cd') },
+  { id: 'R6', merchantId: 'merchant:M4', name: 'Smashed Avo & Poached Egg', category: 'Food', selling: 74, cost: 28, stock: 60, barcode: 'REST-MP-01', unit: 'Plate', image: image('photo-1574071318508-1cdbab80d002') },
+  { id: 'R9', merchantId: 'merchant:M4', name: 'Bottomless Filter Coffee', category: 'Beverage', selling: 49, cost: 12, stock: 120, barcode: 'REST-CL-01', unit: 'Cup', image: image('photo-1515003197210-e0cd71810b5f') },
+  { id: 'R12', merchantId: 'merchant:M4', name: 'Cappuccino', category: 'Beverage', selling: 45, cost: 12, stock: 200, barcode: 'REST-ES-01', unit: 'Cup', image: image('photo-1495474472287-4d71bcdd2085') },
+  { id: 'R15', merchantId: 'merchant:M4', name: 'Chicken Mayo Toasted Sandwich', category: 'Food', selling: 68, cost: 25, stock: 35, barcode: 'REST-CS-02', unit: 'Plate', image: image('photo-1544025162-d76694265947') },
+  { id: 'R16', merchantId: 'merchant:M4', name: 'Famous Giant Muffin', category: 'Food', selling: 52, cost: 18, stock: 25, barcode: 'REST-MP-02', unit: 'Each', image: image('photo-1551024506-0bccd828d307') },
+  { id: 'R17', merchantId: 'merchant:M4', name: 'Rooibos Tea', category: 'Beverage', selling: 30, cost: 8, stock: 120, barcode: 'REST-RT-01', unit: 'Cup', image: image('photo-1544787219-7f47ccb76574') },
+  { id: 'R18', merchantId: 'merchant:M4', name: 'Caribbean Mocha', category: 'Beverage', selling: 59, cost: 18, stock: 100, barcode: 'REST-CM-01', unit: 'Cup', image: image('photo-1495474472287-4d71bcdd2085') },
+  { id: 'R19', merchantId: 'merchant:M4', name: 'Guava & Grapefruit Fruity Fizz', category: 'Beverage', selling: 66, cost: 20, stock: 80, barcode: 'REST-GF-01', unit: 'Glass', image: image('photo-1544145945-f90425340c7e') },
+  { id: 'R20', merchantId: 'merchant:M4', name: 'Triple Chocolate Brownie', category: 'Food', selling: 40, cost: 14, stock: 30, barcode: 'REST-TB-01', unit: 'Each', image: image('photo-1575377427642-087cf684f29d') },
+  { id: 'R21', merchantId: 'merchant:M4', name: 'Buffalo Chicken & Blue Cheese Eggs Benedict', category: 'Food', selling: 84, cost: 32, stock: 25, barcode: 'REST-BC-01', unit: 'Plate', image: image('photo-1544025162-d76694265947') },
+  { id: 'R22', merchantId: 'merchant:M4', name: 'Muesli & Yoghurt Pot', category: 'Food', selling: 69, cost: 24, stock: 25, barcode: 'REST-MY-01', unit: 'Pot', image: image('photo-1512621776951-a57141f2eefd') },
+];
+
+function localDemoLogin(email: string, password: string) {
+  if (!import.meta.env.DEV) return null;
+  const normalizedEmail = email.trim().toLowerCase();
+  const demoUser = LOCAL_DEMO_USERS[normalizedEmail];
+  if (!demoUser || password !== 'password123') return null;
+
+  const user = { id: `local-${normalizedEmail}`, email: normalizedEmail, ...demoUser, status: 'Active' };
+  return { success: true, token: `local-dev-${btoa(normalizedEmail)}`, user, local: true };
+}
+
+function localDemoPayment(payload: any, idempotencyKey: string) {
+  const subtotal = (payload.items || []).reduce(
+    (sum: number, item: any) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 1), 0
+  );
+  const promoDiscount = Number(payload.promoDiscount) || 0;
+  const pointsDiscount = (Number(payload.pointsToRedeem) || 0) * 0.1;
+  const taxableAmount = Math.max(0, subtotal - promoDiscount - pointsDiscount);
+  const vat = taxableAmount * 0.15;
+  const grandTotal = Math.round((taxableAmount + vat) * 100) / 100;
+  const tendered = Number(payload.amountTendered) || 0;
+  const change = payload.paymentMethod === 'Cash' ? Math.round((tendered - grandTotal) * 100) / 100 : 0;
+  const txnId = `LOCAL-${Date.now()}`;
+  const date = new Date().toISOString();
+  const items = (payload.items || []).map((item: any) => ({
+    ...item,
+    quantity: Number(item.quantity) || 1,
+    lineTotal: (Number(item.price) || 0) * (Number(item.quantity) || 1),
+  }));
+  const transaction = {
+    id: txnId, receiptNo: `RX-LOCAL-${Date.now()}`, merchantId: payload.merchantId,
+    amount: grandTotal, subtotal, vat, promoDiscount, pointsDiscount,
+    method: payload.paymentMethod, status: 'Approved', items,
+    cashierName: payload.cashierName || 'Demo Cashier', terminalId: payload.terminalId || 'POS-LOCAL',
+    shiftId: payload.shiftId || null, date, processedAt: date,
+    ...(payload.paymentMethod === 'Cash' ? { amountTendered: tendered, change } : {}),
+    ...(payload.paymentMethod === 'Card' ? { authCode: 'LOCAL01', cardRef: '****0000' } : {}),
+  };
+  return {
+    success: true,
+    transaction,
+    receipt: { ...transaction, paymentMethod: payload.paymentMethod, grandTotal, change, date },
+    _idempotencyKey: idempotencyKey,
+    _local: true,
+  };
+}
 
 // --- Network Monitoring ---
 type NetworkEventListener = (event: any) => void;
@@ -175,6 +292,16 @@ export const api = {
 
   // Users
   getUserProfile: async (userId: string) => {
+    // A local demo session is intentionally self-contained so the UI remains
+    // usable when the optional remote backend is unavailable during development.
+    if (userId.startsWith('local-')) {
+      try {
+        const storedUser = localStorage.getItem('clintpos_auth_user');
+        return storedUser ? JSON.parse(storedUser) : null;
+      } catch {
+        return null;
+      }
+    }
     try {
       const res = await fetchWithTimeout(`${SERVER_URL}/user/${userId}`, { headers: await getHeaders() });
       if (!res.ok) return null;
@@ -204,6 +331,13 @@ export const api = {
       return await safeJson(res, { error: 'Login failed' });
     } catch (e: any) {
       console.error('[API] login error:', e);
+      // Do not hide invalid credentials. The fallback is only for an unreachable
+      // backend and only accepts the documented demo password.
+      const localSession = localDemoLogin(email, password);
+      if (localSession) {
+        console.warn('[API] Remote auth unavailable; using local demo session.');
+        return localSession;
+      }
       return { error: e?.message || 'Login failed' };
     }
   },
@@ -287,10 +421,71 @@ export const api = {
   getStock: async (merchantId: string) => {
     try {
       const res = await fetchWithTimeout(`${SERVER_URL}/stock?merchantId=${merchantId}`, { headers: await getHeaders() });
-      return await safeJson(res, []);
+      const data = await safeJson(res, []);
+      if (import.meta.env.DEV && (!Array.isArray(data) || data.length === 0)) {
+        return LOCAL_DEMO_STOCK.filter(item => item.merchantId === merchantId);
+      }
+      return data;
     } catch (e) {
       console.error('[API] getStock error:', e);
+      if (import.meta.env.DEV) return LOCAL_DEMO_STOCK.filter(item => item.merchantId === merchantId);
       return [];
+    }
+  },
+  lookupBarcode: async (barcode: string) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-lookup?barcode=${encodeURIComponent(barcode)}`, {
+        headers: await getHeaders()
+      }, 15000);
+      return await safeJson(res, { success: false, error: 'Barcode lookup failed' });
+    } catch (e: any) {
+      console.error('[API] barcode lookup error:', e);
+      return { success: false, error: e?.message || 'Barcode lookup failed' };
+    }
+  },
+  searchProductCloud: async (query: string) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud?query=${encodeURIComponent(query)}&limit=2000`, {
+        headers: await getHeaders()
+      });
+      return await safeJson(res, []);
+    } catch (e) {
+      console.error('[API] product cloud search error:', e);
+      return [];
+    }
+  },
+  getProductCloud: async () => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud?limit=2000`, { headers: await getHeaders() });
+      return await safeJson(res, []);
+    } catch (e) {
+      console.error('[API] product cloud load error:', e);
+      return [];
+    }
+  },
+  enrichProductCloud: async (limit = 100) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/enrich-barcodenest`, {
+        method: 'POST',
+        headers: await getHeaders(),
+        body: JSON.stringify({ limit })
+      }, 120000);
+      return await safeJson(res, { success: false, error: 'BarcodeNest enrichment failed' });
+    } catch (e: any) {
+      console.error('[API] product cloud enrichment error:', e);
+      return { success: false, error: e?.message || 'BarcodeNest enrichment failed' };
+    }
+  },
+  importLoyaltyHubCatalog: async (offset = 0, limit = 500) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/import-loyaltyhub-catalog`, {
+        method: 'POST',
+        headers: await getHeaders(),
+        body: JSON.stringify({ offset, limit }),
+      }, 120000);
+      return await safeJson(res, { success: false, error: 'LoyaltyHub import failed' });
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'LoyaltyHub import failed' };
     }
   },
   saveStock: async (data: any) => {
@@ -356,6 +551,11 @@ export const api = {
     idempotencyKey?: string;
   }) => {
     const iKey = payload.idempotencyKey || crypto.randomUUID();
+    try {
+      if (localStorage.getItem('clintpos_auth_token')?.startsWith('local-dev-')) {
+        return localDemoPayment(payload, iKey);
+      }
+    } catch {}
     // Strip idempotencyKey from body (sent as header instead)
     const { idempotencyKey: _ik, ...body } = payload;
     const doAttempt = async (attempt: number): Promise<any> => {
@@ -383,6 +583,13 @@ export const api = {
           return doAttempt(attempt + 1);
         }
         console.error('[API] processPayment error:', e);
+        const localToken = (() => {
+          try { return localStorage.getItem('clintpos_auth_token')?.startsWith('local-dev-'); } catch { return false; }
+        })();
+        if (localToken) {
+          console.warn('[API] Payment gateway unavailable; completing local demo payment.');
+          return localDemoPayment(payload, iKey);
+        }
         return { success: false, error: e?.message || 'Payment request failed — check network connection', _idempotencyKey: iKey, _retriable: true };
       }
     };
@@ -1226,6 +1433,55 @@ export const api = {
   },
 
   // --- Restaurant: Tables ---
+  getRestaurantMenu: async (merchantId: string) => {
+    try {
+      // This is a public QR-menu read. Avoid auth/session headers so mobile
+      // browsers do not need a custom-header CORS preflight just to view it.
+      const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/menu/${encodeURIComponent(merchantId)}`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) throw new Error(`Menu request failed (${res.status})`);
+      return await safeJson(res, []);
+    } catch (e) {
+      console.error('[API] getRestaurantMenu error:', e);
+      return [];
+    }
+  },
+  submitRestaurantOrder: async (data: { merchantId: string; tableId: string; customerName?: string; items: any[]; notes?: string; paymentMethod?: string }) => {
+    const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders`, { method: 'POST', headers: await getHeaders(), body: JSON.stringify(data) }, 30000);
+    return await safeJson(res, { success: false, error: 'Could not submit order' });
+  },
+  requestRestaurantPayment: async (orderId: string, paymentMethod: string) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders/${encodeURIComponent(orderId)}/payment-request`, { method: 'POST', headers: await getHeaders(), body: JSON.stringify({ paymentMethod }) });
+      return await safeJson(res, { success: false, error: 'Could not send payment request' });
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Could not send payment request' };
+    }
+  },
+  createRestaurantRequest: async (data: { merchantId: string; tableId: string; type: string; note?: string }) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/requests`, { method: 'POST', headers: await getHeaders(), body: JSON.stringify(data) });
+      return await safeJson(res, { success: false, error: 'Could not send request' });
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Could not send request' };
+    }
+  },
+  getRestaurantOrders: async (merchantId: string, status?: string) => {
+    try {
+      const query = new URLSearchParams({ merchantId });
+      if (status) query.set('status', status);
+      const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders?${query}`, { headers: await getHeaders() });
+      return await safeJson(res, []);
+    } catch (e) {
+      console.error('[API] getRestaurantOrders error:', e);
+      return [];
+    }
+  },
+  approveRestaurantOrder: async (orderId: string) => {
+    const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders/${encodeURIComponent(orderId)}/approve`, { method: 'POST', headers: await getHeaders() });
+    return await safeJson(res, { success: false, error: 'Could not approve order' });
+  },
   getTables: async (merchantId: string) => {
     try {
       const res = await fetchWithTimeout(`${SERVER_URL}/tables/${encodeURIComponent(merchantId)}`, { headers: await getHeaders() });

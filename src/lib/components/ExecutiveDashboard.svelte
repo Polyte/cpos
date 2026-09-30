@@ -579,7 +579,7 @@
     </div>
   </div>
 {:else}
-<div class="p-6 lg:p-8 space-y-6 animate-in fade-in duration-700 max-w-[1800px] mx-auto">
+<div class="dashboard-shell p-4 sm:p-6 lg:p-8 space-y-6 animate-in fade-in duration-700 max-w-[1800px] mx-auto">
 
   <!-- â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
   <div class="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
@@ -1498,3 +1498,19 @@
 
 </div>
 {/if}
+
+<style>
+  .dashboard-shell {
+    min-height: 100%;
+    background: radial-gradient(circle at 0% 0%, rgba(99, 102, 241, .08), transparent 32rem), radial-gradient(circle at 100% 12%, rgba(16, 185, 129, .05), transparent 28rem);
+  }
+
+  .dashboard-shell :global(.rounded-\[40px\]) { border-radius: 1.75rem; }
+  .dashboard-shell :global(.rounded-\[28px\]) { border-radius: 1.4rem; }
+  .dashboard-shell :global(.shadow-\[0_8px_30px_rgba\(0\,0\,0\,0\.02\)\]) { box-shadow: 0 14px 36px rgba(15, 23, 42, .06); }
+  .dashboard-shell :global(button) { min-height: 2.75rem; }
+  @media (max-width: 640px) {
+    .dashboard-shell :global(.p-8) { padding: 1.25rem; }
+    .dashboard-shell :global(.text-3xl), .dashboard-shell :global(.text-4xl) { font-size: 1.65rem; line-height: 1.1; }
+  }
+</style>

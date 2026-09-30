@@ -10,6 +10,7 @@
   } from 'recharts';
   import { toast } from 'svelte-sonner';
   import { fly } from 'svelte/transition';
+  import { onMount } from 'svelte';
   import { api } from '../api';
 
   const PIE_COLORS = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
@@ -17,6 +18,7 @@
   let { merchantId, role }: { merchantId: string; role: string } = $props();
 
   let loading = $state(true);
+  let loadError = $state('');
   let transactions = $state<any[]>([]);
   let shifts = $state<any[]>([]);
   let stockAlerts = $state<any[]>([]);
@@ -36,26 +38,32 @@
 
   const loadAll = async () => {
     loading = true;
+    loadError = '';
     try {
-      const [txns, shiftData, alerts, audits] = await Promise.all([
+      const results = await Promise.allSettled([
         api.getTransactions(merchantId),
         api.getShifts(merchantId),
         api.getStockAlerts(merchantId, 15),
         api.getAuditEvents(merchantId),
       ]);
+      const [txns, shiftData, alerts, audits] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
       transactions = Array.isArray(txns) ? txns : [];
       shifts = Array.isArray(shiftData) ? shiftData : [];
       stockAlerts = alerts?.alerts || [];
       auditEvents = Array.isArray(audits) ? audits : [];
-    } catch {
+      if (results.some((result) => result.status === 'rejected')) {
+        loadError = 'Some dashboard data could not be loaded.';
+      }
+    } catch (error) {
+      loadError = 'Dashboard data could not be loaded.';
       toast.error('Failed to load dashboard data');
     } finally {
       loading = false;
     }
   };
 
-  $effect(() => {
-    loadAll();
+  onMount(() => {
+    void loadAll();
   });
 
   const today = $derived(new Date().toDateString());
@@ -131,8 +139,12 @@
   <div class="flex items-center justify-center h-full">
     <Loader2 class="w-8 h-8 animate-spin text-neutral-300" />
   </div>
+{:else if loadError && !transactions.length && !shifts.length && !stockAlerts.length && !auditEvents.length}
+  <div class="flex h-full items-center justify-center p-8">
+    <div class="max-w-md rounded-3xl border border-rose-200 bg-rose-50 p-8 text-center dark:border-rose-900/50 dark:bg-rose-950/20"><AlertTriangle class="mx-auto mb-3 text-rose-500" /><h2 class="text-lg font-black dark:text-white">Dashboard unavailable</h2><p class="mt-2 text-sm text-neutral-500">{loadError}</p><button onclick={loadAll} class="mt-5 rounded-xl bg-neutral-900 px-5 py-3 text-sm font-bold text-white">Retry</button></div>
+  </div>
 {:else}
-  <div class="p-8 space-y-8 animate-in fade-in duration-500 max-w-[1600px] mx-auto">
+  <div class="dashboard-shell p-4 sm:p-6 lg:p-8 space-y-6 lg:space-y-8 animate-in fade-in duration-500 max-w-[1600px] mx-auto">
     <div class="flex flex-col md:flex-row md:items-center justify-between gap-6">
       <div>
         <h2 class="text-3xl font-black tracking-tight dark:text-neutral-100">Operations Dashboard</h2>
@@ -443,3 +455,19 @@
     {/if}
   </div>
 {/if}
+
+<style>
+  .dashboard-shell {
+    min-height: 100%;
+    background: radial-gradient(circle at 0% 0%, rgba(245, 158, 11, .07), transparent 30rem), radial-gradient(circle at 100% 18%, rgba(79, 70, 229, .06), transparent 28rem);
+  }
+
+  .dashboard-shell :global(.rounded-\[40px\]) { border-radius: 1.75rem; }
+  .dashboard-shell :global(.rounded-\[28px\]) { border-radius: 1.4rem; }
+  .dashboard-shell :global(.shadow-\[0_8px_30px_rgba\(0\,0\,0\,0\.02\)\]) { box-shadow: 0 14px 36px rgba(15, 23, 42, .06); }
+  .dashboard-shell :global(button) { min-height: 2.75rem; }
+  @media (max-width: 640px) {
+    .dashboard-shell :global(.p-8) { padding: 1.25rem; }
+    .dashboard-shell :global(.text-3xl) { font-size: 1.65rem; line-height: 1.1; }
+  }
+</style>

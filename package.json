@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "import:loyaltyhub": "node scripts/import-loyaltyhub.mjs",
+    "preview": "vite preview"
   },
   "dependencies": {
     "@types/leaflet": "^1.9.14",
@@ -32,6 +34,7 @@
     "clsx": "2.1.1",
     "phosphor-svelte": "^3.1.0",
     "shadcn-svelte": "^1.3.0",
+    "supabase": "^2.118.0",
     "tailwind-merge": "3.6.0",
     "tailwind-variants": "^3.2.2",
     "tailwindcss": "4.1.12",

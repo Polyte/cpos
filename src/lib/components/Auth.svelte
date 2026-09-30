@@ -14,6 +14,7 @@
 
   import clintposLogo from '../../assets/7b6bbd404eeac313228fbca5235f779f7e8e6d0c.png';
   import posCheckoutImage from '../../assets/login-hero-pos-checkout.jpeg';
+  import MerchantOnboarding from './MerchantOnboarding.svelte';
 
   // ---------------------------------------------------------------------------
   // Hero carousel (right panel)
@@ -308,19 +309,8 @@
   }
 </script>
 
-<!-- =========================================================================
-     Onboarding placeholder
-     ========================================================================= -->
 {#if mode === 'onboarding'}
-  <div class="min-h-screen flex flex-col items-center justify-center bg-background p-8">
-    <div class="max-w-md w-full bg-muted/40 border border-border rounded-3xl p-8 text-center">
-      <p class="text-muted-foreground text-sm mb-6">New Merchant Onboarding (coming soon)</p>
-      <Button variant="ghost" size="sm" onclick={() => (mode = 'login')} class="mx-auto gap-2">
-        <ArrowLeft size={14} />
-        Back to Login
-      </Button>
-    </div>
-  </div>
+  <MerchantOnboarding oncomplete={() => (mode = 'login')} />
 
 <!-- =========================================================================
      Login screen — split layout

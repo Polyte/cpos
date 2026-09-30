@@ -185,6 +185,7 @@ import { cacheProducts, getCachedProducts } from '../LocalDB';
             id: item.id, merchantId: item.merchantId || merchantId,
             name: item.name, price: item.selling || 0,
             category: item.category || 'General', barcode: item.barcode || '',
+            image: item.image || '',
             cachedAt: Date.now()
           }))); } catch {}
         }
@@ -204,7 +205,7 @@ import { cacheProducts, getCachedProducts } from '../LocalDB';
         });
         products = filteredData.map((item: any) => ({
           id: item.id, name: item.name, price: item.selling || 0,
-          category: item.category || 'General', barcode: item.barcode || '', quantity: 0
+          category: item.category || 'General', barcode: item.barcode || '', image: item.image || '', quantity: 0
         }));
       }
     } catch { toast.error('Failed to load products'); }
@@ -661,7 +662,9 @@ import { cacheProducts, getCachedProducts } from '../LocalDB';
             <button in:fly={{y: 15, duration: 300, delay: idx * 15, opacity: 0}} onclick={() => addToCart(item)} class="bg-neutral-900 border border-neutral-800 rounded-2xl p-3 text-left relative overflow-hidden active:scale-[0.97] active:border-amber-500/30 transition-all">
               {#if badges.length > 0}<span class="absolute top-2 right-2 px-1.5 py-0.5 bg-amber-500 text-black rounded text-[6px] font-black uppercase tracking-wider">{badges[0]}</span>{/if}
               {#if inCart}<span class="absolute top-2 left-2 w-5 h-5 bg-amber-500 text-black rounded-full text-[9px] font-black flex items-center justify-center">{inCart.quantity}</span>{/if}
-              <div class="w-12 h-12 bg-neutral-800 rounded-xl flex items-center justify-center text-2xl mb-2 mx-auto">{CATEGORY_EMOJIS[item.category || 'General'] || '\ud83d\udce6'}</div>
+              <div class="w-12 h-12 bg-neutral-800 rounded-xl flex items-center justify-center text-2xl mb-2 mx-auto overflow-hidden">
+                {#if item.image}<img src={item.image} alt={item.name} loading="lazy" class="w-full h-full object-cover" />{:else}{CATEGORY_EMOJIS[item.category || 'General'] || '\ud83d\udce6'}{/if}
+              </div>
               <p class="text-[9px] font-black uppercase tracking-tight text-neutral-500 leading-none mb-0.5">{item.category}</p>
               <p class="text-[11px] font-black text-white truncate leading-tight mb-1">{item.name}</p>
               <p class="text-sm font-black text-amber-400 tabular-nums">R {item.price.toFixed(2)}</p>

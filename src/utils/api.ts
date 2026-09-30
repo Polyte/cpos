@@ -3,7 +3,7 @@ import { supabase } from './supabaseClient';
 
 export { supabase };
 
-const project = projectId || 'ujgeqvqkvxuhrciketvo';
+const project = projectId || 'tktryrmospxbbuylweui';
 const ANON_KEY = publicAnonKey;
 
 // Backend server URL — this points to the Hono edge function (now backed by Turso)
@@ -1226,6 +1226,34 @@ export const api = {
   },
 
   // --- Restaurant: Tables ---
+  getRestaurantMenu: async (merchantId: string) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/menu/${encodeURIComponent(merchantId)}`, { headers: await getHeaders() });
+      return await safeJson(res, []);
+    } catch (e) {
+      console.error('[API] getRestaurantMenu error:', e);
+      return [];
+    }
+  },
+  submitRestaurantOrder: async (data: { merchantId: string; tableId: string; customerName?: string; items: any[]; notes?: string }) => {
+    const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders`, { method: 'POST', headers: await getHeaders(), body: JSON.stringify(data) }, 30000);
+    return await safeJson(res, { success: false, error: 'Could not submit order' });
+  },
+  getRestaurantOrders: async (merchantId: string, status?: string) => {
+    try {
+      const query = new URLSearchParams({ merchantId });
+      if (status) query.set('status', status);
+      const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders?${query}`, { headers: await getHeaders() });
+      return await safeJson(res, []);
+    } catch (e) {
+      console.error('[API] getRestaurantOrders error:', e);
+      return [];
+    }
+  },
+  approveRestaurantOrder: async (orderId: string) => {
+    const res = await fetchWithTimeout(`${SERVER_URL}/restaurant/orders/${encodeURIComponent(orderId)}/approve`, { method: 'POST', headers: await getHeaders() });
+    return await safeJson(res, { success: false, error: 'Could not approve order' });
+  },
   getTables: async (merchantId: string) => {
     try {
       const res = await fetchWithTimeout(`${SERVER_URL}/tables/${encodeURIComponent(merchantId)}`, { headers: await getHeaders() });

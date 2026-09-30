@@ -67,6 +67,8 @@
   let uploading = $state(false);
   let fileInputRef = $state<HTMLInputElement | null>(null);
   let scannerActive = $state(false);
+  let barcodeLookupLoading = $state(false);
+  let barcodeLookupMessage = $state('');
 
   // FR-09 Pricing Control State
   let showPricingModal = $state<any>(null);
@@ -360,6 +362,58 @@
       toast.error('Failed to upload image');
     } finally {
       uploading = false;
+    }
+  }
+
+  function barcodeCategory(product: any): string {
+    const categories = Array.isArray(product?.categories) ? product.categories.join(' ') : String(product?.categories || '');
+    const value = categories.toLowerCase();
+    if (value.includes('beverage') || value.includes('drink') || value.includes('coffee') || value.includes('tea')) return 'Beverage';
+    if (value.includes('dairy') || value.includes('milk') || value.includes('cheese')) return 'Dairy';
+    return 'General';
+  }
+
+  async function handleBarcodeLookup() {
+    const barcode = productData.barcode.trim();
+    if (!/^\d{8,14}$/.test(barcode)) {
+      toast.error('Enter a valid numeric barcode first');
+      return;
+    }
+
+    barcodeLookupLoading = true;
+    barcodeLookupMessage = '';
+    try {
+      const localInventoryMatch = items.find((item) => String(item.barcode || '') === barcode);
+      const cloudMatches = localInventoryMatch ? [] : await api.searchProductCloud(barcode);
+      const sharedMatch = Array.isArray(cloudMatches) ? cloudMatches.find((item: any) => String(item.barcode || '') === barcode) : null;
+      const result = localInventoryMatch
+        ? { success: true, barcode, product: { ...localInventoryMatch, image_url: localInventoryMatch.imageUrl || localInventoryMatch.image } }
+        : sharedMatch
+        ? { success: true, barcode, product: { ...sharedMatch, image_url: sharedMatch.imageUrl || sharedMatch.image } }
+        : await api.lookupBarcode(barcode);
+      if (!result.success || !result.product) {
+        barcodeLookupMessage = result.error || 'No product found for this barcode';
+        toast.error(barcodeLookupMessage);
+        return;
+      }
+
+      const product = result.product;
+      productData = {
+        ...productData,
+        name: product.name || productData.name,
+        barcode: result.barcode || barcode,
+        category: barcodeCategory(product),
+        unit: product.quantity || productData.unit,
+        supplier: product.brand || productData.supplier,
+        imageUrl: product.image_url || productData.imageUrl
+      };
+      barcodeLookupMessage = `${product.brand ? `${product.brand} · ` : ''}${product.name || 'Product found'}`;
+      toast.success(localInventoryMatch ? 'Product loaded from current inventory' : sharedMatch ? 'Product loaded from ClintonProduct Cloud' : 'Product details loaded from BarcodeNest');
+    } catch (e: any) {
+      barcodeLookupMessage = e?.message || 'Barcode lookup failed';
+      toast.error(barcodeLookupMessage);
+    } finally {
+      barcodeLookupLoading = false;
     }
   }
 
@@ -1191,6 +1245,18 @@
                 placeholder="Scan or type barcode"
               />
             </div>
+            <button
+              type="button"
+              onclick={handleBarcodeLookup}
+              disabled={barcodeLookupLoading || !productData.barcode.trim()}
+              class="w-full py-3 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-indigo-100 disabled:opacity-40 transition-all flex items-center justify-center gap-2"
+            >
+              {#if barcodeLookupLoading}<Loader2 size={14} class="animate-spin" />{:else}<Search size={14} />{/if}
+              {barcodeLookupLoading ? 'Looking up product…' : 'Search BarcodeNest'}
+            </button>
+            {#if barcodeLookupMessage}
+              <p class="text-[9px] font-bold text-indigo-600 leading-relaxed">{barcodeLookupMessage}</p>
+            {/if}
           </div>
 
           <!-- SKU -->

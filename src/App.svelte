@@ -2,9 +2,9 @@
   import { fly, fade } from 'svelte/transition';
   import { Toaster, toast } from 'svelte-sonner';
   import {
-    Store, Package, BarChart3, Settings, Users, ShieldCheck, Wrench,
+    Store, Package, BarChart3, Settings, Users, ShieldCheck, Wrench, Database,
     LogOut, Bell, Moon, Sun, Lock, ChevronDown, Activity, LayoutDashboard,
-    Fuel, UtensilsCrossed, UserCog, FileText, Headset, Network, Smartphone,
+    Fuel, UtensilsCrossed, ChefHat, UserCog, FileText, Headset, Network, Smartphone,
     ShoppingCart, Clock, Shield, Heart, Gauge, Menu, X
   } from 'lucide-svelte';
 
@@ -30,12 +30,16 @@
   import MerchantSettings from './lib/components/MerchantSettings.svelte';
   import NetworkResilienceMonitor from './lib/components/NetworkResilienceMonitor.svelte';
   import CustomerDisplay from './lib/components/CustomerDisplay.svelte';
+  import ProductCloud from './lib/components/ProductCloud.svelte';
+  import RestaurantPOS from './lib/components/RestaurantPOS.svelte';
+  import RestaurantCustomerMenu from './lib/components/RestaurantCustomerMenu.svelte';
+  import KitchenDisplay from './lib/components/KitchenDisplay.svelte';
 
   // â”€â”€â”€ Standalone customer display route â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Matches both #/display (hash) and /display (path) so either link works.
   function computeRoute() {
     const hash = window.location.hash.replace(/^#\/?/, '');
-    const path = window.location.pathname.replace(/^\//, '');
+    const path = window.location.pathname.replace(/^\//, '').replace(/\/+$/, '');
     return hash || path;
   }
   let route = $state(computeRoute());
@@ -49,6 +53,8 @@
     };
   });
   let isCustomerDisplay = $derived(route === 'display');
+  let isRestaurantMenu = $derived(route === 'menu' || route === 'restaurant-menu');
+  let isKitchenDisplay = $derived(route === 'kitchen');
 
   // â”€â”€â”€ Module-level timer refs (not reactive) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -80,7 +86,7 @@
       name: 'Executive Command',
       description: 'Full system access with administrative privileges',
       color: 'indigo',
-      tabs: ['dashboard', 'merchants', 'customers', 'reports', 'forensic', 'users', 'support', 'settings'],
+      tabs: ['dashboard', 'merchants', 'customers', 'reports', 'forensic', 'users', 'product-cloud', 'support', 'settings'],
     },
     Manager: {
       name: 'Operations Manager',
@@ -118,9 +124,11 @@
 
   const navigation = [
     { id: 'pos', name: 'Terminal', icon: ShoppingCart, roles: ['Cashier'] },
+    { id: 'kitchen', name: 'Kitchen Display', icon: ChefHat, roles: ['Manager', 'Supervisor', 'Cashier'] },
     { id: 'inventory', name: 'Stock Control', icon: Package, roles: ['Admin', 'Manager', 'Supervisor', 'StockController'] },
     { id: 'merchants', name: 'Merchants', icon: Store, roles: ['Admin'] },
     { id: 'users', name: 'Users & Access', icon: Users, roles: ['Admin', 'Manager'] },
+    { id: 'product-cloud', name: 'ClintonProduct Cloud', icon: Database, roles: ['Admin'] },
     { id: 'support', name: 'Remote Support', icon: Activity, roles: ['Admin', 'Manager', 'Supervisor', 'StockController'] },
     { id: 'reports', name: 'Global Audit', icon: BarChart3, roles: ['Admin', 'Manager'] },
     { id: 'forensic', name: 'Forensic Ledger', icon: Shield, roles: ['Admin', 'Manager', 'Supervisor'] },
@@ -132,7 +140,13 @@
   ];
 
   // â”€â”€â”€ Derived â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  let currentProfileConfig = $derived(roleProfiles[role] || roleProfiles['Cashier']);
+  let currentProfileConfig = $derived.by(() => {
+    const base = roleProfiles[role] || roleProfiles['Cashier'];
+    if (profile === 'Restaurant' && role !== 'Admin') {
+      return { ...base, tabs: Array.from(new Set([...base.tabs, 'pos', 'kitchen'])) };
+    }
+    return base;
+  });
   let filteredNav = $derived(navigation.filter(nav => currentProfileConfig.tabs.includes(nav.id)));
   let currentTheme = $derived(roleThemes[role as keyof typeof roleThemes] || roleThemes['Cashier']);
 
@@ -266,6 +280,7 @@
           userProfile = profileData;
           role = profileData.role || 'Cashier';
           profile = profileData.profile || 'Retail';
+          if (profileData.profile === 'Restaurant') activeTab = 'pos';
           try {
             const shiftRes = await api.getActiveShift(user.id);
             if (shiftRes.active) {
@@ -281,6 +296,7 @@
         } else {
           role = user.role || 'Cashier';
           profile = user.profile || 'Retail';
+          if (user.profile === 'Restaurant') activeTab = 'pos';
         }
         isAuthenticated = true;
         try {
@@ -369,6 +385,10 @@
 
 {#if isCustomerDisplay}
   <CustomerDisplay />
+{:else if isRestaurantMenu}
+  <RestaurantCustomerMenu />
+{:else if isKitchenDisplay}
+  <KitchenDisplay />
 {:else}
 
 {#if showConversionDashboard}
@@ -398,7 +418,7 @@
 
 
 <!-- â”€â”€â”€ Authenticated: mobile cashier shortcut â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-{:else if isMobile && role === 'Cashier'}
+{:else if isMobile && role === 'Cashier' && profile !== 'Restaurant'}
   <MobilePOS
     profile={profile as any}
     role={role as any}
@@ -674,12 +694,14 @@
             {#if activeTab === 'pos'}
               {#key role}
                 {#if profile === 'Restaurant'}
-                  <!-- RestaurantPOS not yet a separate tab -->
-                  <POSInterface {profile} {role} userName={userProfile?.name} shiftId={activeShift?.id} {darkMode} setDarkMode={(v: boolean) => darkMode = v} onLockTerminal={() => terminalLocked = true} onLogout={handleLogout} />
+                  <RestaurantPOS {profile} {role} userName={userProfile?.name} shiftId={activeShift?.id} />
                 {:else}
                   <POSInterface {profile} {role} userName={userProfile?.name} shiftId={activeShift?.id} {darkMode} setDarkMode={(v: boolean) => darkMode = v} onLockTerminal={() => terminalLocked = true} onLogout={handleLogout} />
                 {/if}
               {/key}
+
+            {:else if activeTab === 'kitchen' && profile === 'Restaurant'}
+              <KitchenDisplay />
 
             {:else if activeTab === 'inventory'}
               <Inventory {profile} {role} />
@@ -692,6 +714,9 @@
 
             {:else if activeTab === 'users'}
               <IdentityManagement {profile} {role} />
+
+            {:else if activeTab === 'product-cloud'}
+              <ProductCloud {role} />
 
             {:else if activeTab === 'support'}
               <SupportCenter />

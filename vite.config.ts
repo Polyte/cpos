@@ -27,4 +27,9 @@ export default defineConfig({
     },
   },
   assetsInclude: ['**/*.svg', '**/*.csv'],
+  preview: {
+    // Required when the local preview is opened through a temporary HTTPS
+    // tunnel for mobile testing or QR menu access.
+    allowedHosts: true,
+  },
 })

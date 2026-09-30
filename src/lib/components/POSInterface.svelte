@@ -439,6 +439,7 @@ import { printService } from '../PrintService';
               price: item.selling || 0,
               category: item.category || 'General',
               barcode: item.barcode || '',
+              image: item.image || '',
               cachedAt: Date.now()
             })));
           } catch {}
@@ -464,6 +465,7 @@ import { printService } from '../PrintService';
           price: item.selling || 0,
           category: item.category || 'General',
           barcode: item.barcode || '',
+          image: item.image || '',
           quantity: 0
         }));
       }
@@ -1029,8 +1031,12 @@ import { printService } from '../PrintService';
                 </div>
               </div>
 
-              <div class="w-24 h-24 bg-white/50 dark:bg-neutral-800 rounded-3xl flex items-center justify-center text-4xl mb-4 transition-all duration-500 group-hover:scale-110 shadow-inner border border-neutral-200/30 dark:border-neutral-700">
-                {item.category === 'Fuel' ? '\u26fd' : item.category === 'Dairy' ? '\ud83e\udd5b' : item.category === 'Mains' ? '\ud83c\udf54' : '\ud83d\udce6'}
+              <div class="w-24 h-24 bg-white/50 dark:bg-neutral-800 rounded-3xl flex items-center justify-center text-4xl mb-4 transition-all duration-500 group-hover:scale-110 shadow-inner border border-neutral-200/30 dark:border-neutral-700 overflow-hidden">
+                {#if item.image}
+                  <img src={item.image} alt={item.name} loading="lazy" class="w-full h-full object-cover" />
+                {:else}
+                  {item.category === 'Fuel' ? '\u26fd' : item.category === 'Dairy' ? '\ud83e\udd5b' : item.category === 'Mains' ? '\ud83c\udf54' : '\ud83d\udce6'}
+                {/if}
               </div>
 
               <p class="text-[9px] font-black uppercase tracking-widest text-neutral-400 mb-1 leading-none">{item.category}</p>

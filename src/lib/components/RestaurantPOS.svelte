@@ -102,6 +102,33 @@
     Dirty: { color: 'text-rose-400', bg: 'bg-rose-500/10', border: 'border-rose-500/30', label: 'Dirty' },
   };
 
+  const FLOOR_ZONE_CONFIG: Record<string, { title: string; subtitle: string; image: string; className: string }> = {
+    Indoor: {
+      title: 'Indoor dining',
+      subtitle: 'Main room · 6 tables',
+      image: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=900&q=80',
+      className: 'floor-zone-indoor',
+    },
+    Bar: {
+      title: 'Bar counter',
+      subtitle: 'Drinks · 2 seats',
+      image: 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=900&q=80',
+      className: 'floor-zone-bar',
+    },
+    Outdoor: {
+      title: 'Garden patio',
+      subtitle: 'Al fresco · 2 tables',
+      image: 'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=900&q=80',
+      className: 'floor-zone-outdoor',
+    },
+    VIP: {
+      title: 'Private dining',
+      subtitle: 'VIP room · 2 tables',
+      image: 'https://images.unsplash.com/photo-1550966871-3ed3cdb5ed0c?auto=format&fit=crop&w=900&q=80',
+      className: 'floor-zone-vip',
+    },
+  };
+
   const KOT_STATUS_CONFIG: Record<string, { color: string; bg: string; label: string }> = {
     NEW: { color: 'text-amber-400', bg: 'bg-amber-500/10', label: 'New' },
     IN_PROGRESS: { color: 'text-blue-400', bg: 'bg-blue-500/10', label: 'Cooking' },
@@ -120,6 +147,7 @@
   let tables: RestaurantTable[] = $state([]);
   let menuItems: MenuItem[] = $state([]);
   let kots: KOT[] = $state([]);
+  let customerOrders: any[] = $state([]);
   let loading = $state(true);
   let sending = $state(false);
   let orderType: OrderType = $state('Dine-in');
@@ -134,7 +162,7 @@
   let tipPercent = $state(0);
   let customTip = $state('');
   let discountAmount = $state(0);
-  let paymentMethod: 'Cash' | 'Card' = $state('Card');
+  let paymentMethod: 'Cash' | 'Card' | 'Online Bank' | 'Apple Pay' | 'Tap' | 'Insert' = $state('Card');
   let cashTendered = $state('');
   let settling = $state(false);
   let showReceipt = $state(false);
@@ -152,6 +180,7 @@
   }> = $state([]);
   let settlingSplit = $state(false);
   let splitReceipts: any[] = $state([]);
+  let qrTable: RestaurantTable | null = $state(null);
   let now = $state(Date.now());
 
   // --- Timer ---
@@ -174,6 +203,7 @@
 
   let isActiveKOT = (k: KOT) => k.status !== 'SERVED' && k.status !== 'CANCELLED' && k.status !== 'Completed';
   let activeKOTs = $derived(kots.filter(isActiveKOT));
+  let pendingCustomerOrders = $derived(customerOrders.filter((order) => order.status === 'PENDING_APPROVAL'));
 
   let sectionGroups = $derived.by(() => {
     const acc: Record<string, RestaurantTable[]> = {};
@@ -182,6 +212,8 @@
     }
     return acc;
   });
+  let floorSections = $derived(Object.keys(FLOOR_ZONE_CONFIG).filter(section => sectionGroups[section]?.length));
+  let occupiedTables = $derived(tables.filter(t => t.status === 'Occupied'));
 
   let cartTotal = $derived(cart.reduce((s, c) => s + c.selling * c.quantity, 0));
 
@@ -229,19 +261,34 @@
     }
   }
 
+  async function loadCustomerOrders() {
+    const data = await api.getRestaurantOrders(MERCHANT_ID, 'PENDING_APPROVAL');
+    if (Array.isArray(data)) customerOrders = data;
+  }
+
   $effect(() => {
     const init = async () => {
       loading = true;
-      await Promise.all([loadTables(), loadMenu(), loadKOTs()]);
+      await Promise.all([loadTables(), loadMenu(), loadKOTs(), loadCustomerOrders()]);
       loading = false;
     };
     init();
   });
 
   $effect(() => {
-    const interval = setInterval(loadKOTs, 10000);
+    const interval = setInterval(() => { loadKOTs(); loadCustomerOrders(); }, 10000);
     return () => clearInterval(interval);
   });
+
+  async function approveCustomerOrder(order: any) {
+    const result = await api.approveRestaurantOrder(order.id);
+    if (result.success) {
+      toast.success('Guest order approved and sent to kitchen');
+      await Promise.all([loadCustomerOrders(), loadKOTs(), loadTables()]);
+    } else {
+      toast.error(result.error || 'Could not approve guest order');
+    }
+  }
 
   function addToCart(item: MenuItem) {
     cart = (() => {
@@ -376,7 +423,7 @@
       toast.success(`Ticket status updated to ${status}`);
       loadKOTs();
 
-      if (status === 'SERVED' || status === 'CANCELLED') {
+      if (status === 'CANCELLED') {
         const kot = kots.find(k => k.id === kotId);
         if (kot?.tableId) {
           await api.updateTableStatus(MERCHANT_ID, kot.tableId, { status: 'Dirty' });
@@ -622,6 +669,19 @@
     if (diff < 3600) return `${Math.floor(diff / 60)}m`;
     return `${Math.floor(diff / 3600)}h${Math.floor((diff % 3600) / 60)}m`;
   }
+
+  function getMenuBarcode(item: any) {
+    return item?.barcode || menuItems.find((menuItem) => menuItem.id === item?.id || menuItem.name === item?.name)?.barcode || 'No barcode';
+  }
+
+  function tableMenuUrl(tableId: string) {
+    // A phone cannot resolve the computer's localhost. Use the configured LAN
+    // origin for local QR codes, while hosted deployments keep their origin.
+    const configuredOrigin = import.meta.env.VITE_PUBLIC_MENU_ORIGIN;
+    const mobileTunnelOrigin = 'https://enter-figure-maintain-gallery.trycloudflare.com';
+    const origin = configuredOrigin || (['localhost', '127.0.0.1'].includes(window.location.hostname) ? mobileTunnelOrigin : window.location.origin);
+    return `${origin}/menu?merchantId=${encodeURIComponent(MERCHANT_ID)}&tableId=${encodeURIComponent(tableId)}`;
+  }
 </script>
 
 {#if loading}
@@ -674,7 +734,8 @@
         {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
       </div>
 
-      <button onclick={() => { loadTables(); loadMenu(); loadKOTs(); }} class="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
+      {#if pendingCustomerOrders.length > 0}<span class="px-2 py-1 rounded-md bg-rose-500/15 border border-rose-500/30 text-[8px] font-black text-rose-300 uppercase">{pendingCustomerOrders.length} guest order{pendingCustomerOrders.length === 1 ? '' : 's'}</span>{/if}
+      <button onclick={() => { loadTables(); loadMenu(); loadKOTs(); loadCustomerOrders(); }} class="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
         <RefreshCw class="w-3.5 h-3.5 text-neutral-500" />
       </button>
     </div>
@@ -685,8 +746,19 @@
     {#key view}
       {#if view === 'floor'}
         <div transition:fade class="h-full overflow-y-auto p-4 space-y-6">
+          {#if pendingCustomerOrders.length > 0}
+            <section class="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 space-y-3">
+              <div><p class="text-[9px] uppercase tracking-widest font-black text-rose-300">Waiter approval queue</p><h2 class="text-lg font-black text-white">Orders from table QR codes</h2></div>
+              <div class="grid gap-3 md:grid-cols-2">
+                {#each pendingCustomerOrders as order (order.id)}
+                  <article class="rounded-xl border border-neutral-700 bg-neutral-900/80 p-3"><div class="flex justify-between gap-3"><div><p class="font-black text-sm text-white">Table {order.tableId}</p><p class="text-[10px] text-neutral-400">{order.customerName || 'Guest'} · {new Date(order.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p></div><span class="font-black text-amber-400">R{Number(order.total || 0).toFixed(2)}</span></div>{#if order.paymentMethod}<div class="mt-2 rounded-lg border border-indigo-400/20 bg-indigo-400/10 px-2.5 py-2 text-[9px] font-black uppercase tracking-widest text-indigo-200">Payment requested: {order.paymentMethod}</div>{/if}<div class="mt-3 space-y-2">{#each order.items || [] as item}<div class="flex items-center justify-between gap-3 rounded-lg border border-neutral-800 bg-neutral-950/60 px-2.5 py-2"><span class="text-xs text-neutral-200">{item.qty}× {item.name}</span><span class="shrink-0 font-mono text-[9px] font-bold tracking-wider text-amber-300">{getMenuBarcode(item)}</span></div>{/each}</div><button onclick={() => approveCustomerOrder(order)} class="mt-3 w-full rounded-lg bg-rose-500 py-2 text-[9px] font-black uppercase tracking-widest text-white hover:bg-rose-400">Approve & send to kitchen</button></article>
+                {/each}
+              </div>
+            </section>
+          {/if}
           <div class="flex items-center gap-3">
             <span class="text-[9px] font-black text-neutral-500 uppercase tracking-widest">Quick Order:</span>
+            <button onclick={() => qrTable = tables[0] || null} class="px-4 py-2 bg-amber-500 text-neutral-950 rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-amber-400 transition-all">QR Menu Codes</button>
             {#each ['Takeaway', 'Delivery'] as type (type)}
               <button
                 onclick={() => { orderType = type as OrderType; selectedTable = null; view = 'menu'; }}
@@ -697,39 +769,82 @@
             {/each}
           </div>
 
-          {#each Object.entries(sectionGroups) as [section, sectionTables]}
-            <div>
-              <div class="flex items-center gap-2 mb-3">
-                <MapPin class="w-3.5 h-3.5 text-neutral-500" />
-                <h3 class="text-[10px] font-black text-neutral-400 uppercase tracking-widest">{section}</h3>
-                <div class="flex-1 h-px bg-neutral-800"></div>
+          <section class="floor-board rounded-[2rem] border border-neutral-700/80 overflow-hidden shadow-2xl shadow-black/20">
+            <div class="relative flex flex-wrap items-end justify-between gap-4 px-5 py-5 border-b border-white/10 bg-neutral-950/70">
+              <div>
+                <p class="text-[9px] uppercase tracking-[0.28em] font-black text-amber-400">Live floor plan</p>
+                <h2 class="mt-1 text-xl font-black text-white tracking-tight">Roxton dining room</h2>
+                <p class="mt-1 text-xs text-neutral-400">Tap any table to open its order, guest count, and current service status.</p>
               </div>
-              <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
-                {#each sectionTables as table (table.id)}
-                  {@const cfg = TABLE_STATUS_CONFIG[table.status] || TABLE_STATUS_CONFIG.Available}
-                  {@const hasActiveKOT = kots.some(k => k.tableId === table.id && isActiveKOT(k))}
-                  <button
-                    onclick={() => handleTableSelect(table)}
-                    class="relative p-4 {cfg.bg} border {cfg.border} {table.shape === 'round' ? 'rounded-full aspect-square' : 'rounded-xl'} flex flex-col items-center justify-center gap-1 hover:scale-105 transition-all group"
-                  >
-                    {#if hasActiveKOT}
-                      <div class="absolute -top-1 -right-1 w-3 h-3 bg-amber-400 rounded-full animate-pulse border-2 border-neutral-950"></div>
-                    {/if}
-                    <span class="text-sm font-black {cfg.color}">{table.number}</span>
-                    <span class="text-[7px] font-bold text-neutral-500 uppercase">{table.name}</span>
-                    <div class="flex items-center gap-1 mt-0.5">
-                      <Users class="w-2.5 h-2.5 text-neutral-600" />
-                      <span class="text-[8px] font-bold text-neutral-500">{table.guestCount || 0}/{table.seats}</span>
-                    </div>
-                    <span class="text-[7px] font-black uppercase tracking-widest {cfg.color}">{cfg.label}</span>
-                    {#if table.serverName}
-                      <span class="text-[7px] font-bold text-neutral-600 truncate max-w-full">{table.serverName}</span>
-                    {/if}
-                  </button>
-                {/each}
+              <div class="flex flex-wrap gap-2 text-[8px] font-black uppercase tracking-widest text-neutral-400">
+                <span class="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">{tables.length} tables</span>
+                <span class="rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1.5 text-amber-300">{occupiedTables.length} occupied</span>
+                <span class="rounded-full border border-blue-400/20 bg-blue-400/10 px-3 py-1.5 text-blue-300">{activeKOTs.length} in kitchen</span>
               </div>
             </div>
-          {/each}
+
+            <div class="floor-map hidden min-h-[620px] grid-cols-12 grid-rows-6 gap-4 p-5 md:grid">
+              <div class="floor-service-island col-span-2 row-span-2 flex flex-col items-center justify-center gap-2 rounded-2xl border border-amber-300/20 bg-neutral-950/80 p-3 text-center shadow-inner">
+                <div class="rounded-full bg-amber-400/15 p-3 text-amber-300"><ChefHat class="h-6 w-6" /></div>
+                <span class="text-[9px] font-black uppercase tracking-widest text-neutral-200">Kitchen pass</span>
+                <span class="text-[8px] text-neutral-500">Chef & pickup</span>
+              </div>
+
+              {#each floorSections as section}
+                {@const sectionTables = sectionGroups[section] || []}
+                {@const zone = FLOOR_ZONE_CONFIG[section]}
+                <section class="{zone.className} floor-zone relative overflow-hidden rounded-3xl border border-white/10 p-4">
+                  <div class="absolute inset-0 bg-cover bg-center opacity-20" style={`background-image: url('${zone.image}')`}></div>
+                  <div class="relative z-10 flex items-start justify-between gap-3">
+                    <div>
+                      <p class="text-[10px] font-black uppercase tracking-[0.2em] text-white">{zone.title}</p>
+                      <p class="mt-1 text-[8px] font-bold uppercase tracking-widest text-white/50">{zone.subtitle}</p>
+                    </div>
+                    <MapPin class="h-4 w-4 text-amber-300/70" />
+                  </div>
+                  <div class="relative z-10 mt-4 flex flex-wrap items-center justify-center gap-3">
+                    {#each sectionTables as table (table.id)}
+                      {@const cfg = TABLE_STATUS_CONFIG[table.status] || TABLE_STATUS_CONFIG.Available}
+                      {@const hasActiveKOT = kots.some(k => k.tableId === table.id && isActiveKOT(k))}
+                      <button onclick={() => handleTableSelect(table)} class="floor-table {table.shape === 'round' ? 'rounded-full' : 'rounded-xl'} {cfg.bg} border {cfg.border} group relative flex min-h-[92px] min-w-[100px] flex-col items-center justify-center gap-1 px-3 py-3 shadow-lg transition-all hover:-translate-y-1 hover:scale-[1.03] hover:border-amber-300/70 hover:shadow-amber-900/30">
+                        {#if hasActiveKOT}<span class="absolute -right-1 -top-1 h-3.5 w-3.5 animate-pulse rounded-full border-2 border-neutral-950 bg-amber-300"></span>{/if}
+                        <span class="text-lg font-black {cfg.color}">{table.number}</span>
+                        <span class="max-w-[90px] truncate text-[8px] font-bold uppercase tracking-wide text-neutral-200/80">{table.name}</span>
+                        <span class="flex items-center gap-1 text-[8px] font-bold text-neutral-400"><Users class="h-2.5 w-2.5" /> {table.guestCount || 0}/{table.seats}</span>
+                        <span class="text-[7px] font-black uppercase tracking-widest {cfg.color}">{cfg.label}</span>
+                      </button>
+                    {/each}
+                  </div>
+                </section>
+              {/each}
+
+              <div class="floor-walkway col-span-2 row-span-4 rounded-2xl border border-dashed border-white/10 bg-black/10 p-3 text-center">
+                <div class="flex h-full flex-col items-center justify-center gap-2 text-neutral-600"><ArrowRight class="h-5 w-5 rotate-90" /><span class="text-[8px] font-black uppercase tracking-[0.25em]">Main walkway</span></div>
+              </div>
+            </div>
+
+            <div class="space-y-5 p-4 md:hidden">
+              {#each floorSections as section}
+                {@const sectionTables = sectionGroups[section] || []}
+                {@const zone = FLOOR_ZONE_CONFIG[section]}
+                <div class="rounded-2xl border border-white/10 bg-neutral-950/50 p-3">
+                  <div class="mb-3 flex items-center justify-between"><div><p class="text-[10px] font-black uppercase tracking-widest text-white">{zone.title}</p><p class="text-[8px] text-neutral-500">{zone.subtitle}</p></div><MapPin class="h-3.5 w-3.5 text-amber-300" /></div>
+                  <div class="grid grid-cols-2 gap-3">
+                    {#each sectionTables as table (table.id)}
+                      {@const cfg = TABLE_STATUS_CONFIG[table.status] || TABLE_STATUS_CONFIG.Available}
+                      {@const hasActiveKOT = kots.some(k => k.tableId === table.id && isActiveKOT(k))}
+                      <button onclick={() => handleTableSelect(table)} class="relative rounded-xl border {cfg.border} {cfg.bg} p-3 text-left transition-all active:scale-95">
+                        {#if hasActiveKOT}<span class="absolute right-2 top-2 h-2.5 w-2.5 animate-pulse rounded-full bg-amber-300"></span>{/if}
+                        <div class="flex items-center justify-between"><span class="text-lg font-black {cfg.color}">T{table.number}</span><span class="text-[8px] font-black uppercase {cfg.color}">{cfg.label}</span></div>
+                        <p class="mt-1 truncate text-[9px] font-bold text-neutral-200">{table.name}</p>
+                        <span class="mt-2 flex items-center gap-1 text-[8px] text-neutral-500"><Users class="h-2.5 w-2.5" /> {table.guestCount || 0}/{table.seats} guests</span>
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </section>
 
           <div class="flex items-center gap-4 pt-2">
             {#each Object.entries(TABLE_STATUS_CONFIG) as [status, cfg]}
@@ -816,6 +931,7 @@
                       <span class="text-[9px] font-bold text-neutral-500 uppercase">{item.course || item.category}</span>
                       <span class="text-[11px] font-black text-amber-400 tabular-nums">R{item.selling.toFixed(2)}</span>
                     </div>
+                    <span class="mt-2 block truncate font-mono text-[8px] font-bold tracking-wider text-neutral-600">{item.barcode || 'No barcode'}</span>
                   </button>
                 {/each}
                 {#if filteredMenu.length === 0}
@@ -1088,8 +1204,7 @@
               <p class="text-[8px] text-neutral-500 mt-1">Select an occupied table to view/settle bill</p>
             </div>
             <div class="flex-1 overflow-y-auto p-3 space-y-2">
-              {@const occupiedTables = tables.filter(t => t.status === 'Occupied')}
-              {#if occupiedTables.length === 0}
+                {#if occupiedTables.length === 0}
                 <div class="flex flex-col items-center justify-center py-16 opacity-30">
                   <LayoutGrid class="w-10 h-10 text-neutral-700 mb-3" />
                   <p class="text-[9px] font-black text-neutral-500 uppercase tracking-widest">No Open Bills</p>
@@ -1220,7 +1335,7 @@
                     <span class="text-sm font-black text-neutral-200 tabular-nums">R{billData.subtotal.toFixed(2)}</span>
                   </div>
 
-                  <div class="flex items-center gap-2">
+                  <div class="flex flex-wrap items-center gap-2">
                     <span class="text-[9px] font-black text-neutral-500 uppercase tracking-widest w-12">Tip</span>
                     <div class="flex items-center gap-1">
                       {#each [0, 10, 15, 20] as pct}
@@ -1270,13 +1385,13 @@
                 </div>
 
                 <div class="px-6 py-3 border-t border-neutral-800 space-y-3">
-                  <div class="flex items-center gap-2">
-                    {#each ['Card', 'Cash'] as method (method)}
+                  <div class="flex flex-wrap items-center gap-2">
+                    {#each ['Card', 'Tap', 'Insert', 'Online Bank', 'Apple Pay', 'Cash'] as method (method)}
                       <button
-                        onclick={() => paymentMethod = method as 'Card' | 'Cash'}
+                        onclick={() => paymentMethod = method as typeof paymentMethod}
                         class="flex-1 py-2.5 rounded-xl flex items-center justify-center gap-2 text-[10px] font-black uppercase tracking-widest transition-all {paymentMethod === method ? 'bg-amber-500 text-neutral-900 shadow-lg shadow-amber-500/20' : 'bg-neutral-800 text-neutral-400 border border-neutral-700/50 hover:border-neutral-600'}"
                       >
-                        {#if method === 'Card'}
+                        {#if method !== 'Cash'}
                           <CreditCard class="w-4 h-4" />
                         {:else}
                           <Banknote class="w-4 h-4" />
@@ -1765,4 +1880,45 @@
     </div>
   {/if}
 </div>
+{#if qrTable}
+  <div class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" role="presentation" onclick={() => qrTable = null} onkeydown={(event) => event.key === 'Escape' && (qrTable = null)}>
+    <div class="w-full max-w-md rounded-3xl bg-neutral-900 border border-neutral-700 p-6 text-center shadow-2xl" role="dialog" aria-modal="true" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
+      <p class="text-[9px] uppercase tracking-[0.25em] font-black text-amber-400">Table QR menu</p>
+      <h2 class="text-2xl font-black text-white mt-2">{qrTable.name}</h2>
+      <div class="flex flex-wrap justify-center gap-2 mt-4">{#each tables as table (table.id)}<button onclick={() => qrTable = table} class="px-3 py-1.5 rounded-lg text-[9px] font-black {qrTable.id === table.id ? 'bg-amber-500 text-neutral-950' : 'bg-neutral-800 text-neutral-300'}">Table {table.number}</button>{/each}</div>
+      <img class="w-56 h-56 mx-auto my-5 rounded-2xl bg-white p-3" alt="QR menu for {qrTable.name}" src={`https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(tableMenuUrl(qrTable.id))}`} />
+      <p class="text-[10px] text-neutral-400 break-all">{tableMenuUrl(qrTable.id)}</p>
+      <div class="flex gap-2 mt-5"><button onclick={() => window.open(tableMenuUrl(qrTable.id), '_blank')} class="flex-1 rounded-xl bg-amber-500 py-3 text-[10px] font-black uppercase tracking-widest text-neutral-950">Open menu</button><button onclick={() => qrTable = null} class="flex-1 rounded-xl bg-neutral-800 py-3 text-[10px] font-black uppercase tracking-widest text-neutral-300">Close</button></div>
+    </div>
+  </div>
 {/if}
+{/if}
+
+<style>
+  .floor-map {
+    background:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
+      repeating-linear-gradient(90deg, rgba(142, 87, 44, .08) 0 18px, rgba(75, 41, 25, .08) 18px 20px),
+      #171310;
+    background-size: 32px 32px, 32px 32px, 44px 100%, auto;
+  }
+
+  .floor-zone {
+    background: linear-gradient(135deg, rgba(28, 23, 20, .9), rgba(12, 10, 9, .78));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 18px 45px rgba(0,0,0,.18);
+  }
+
+  .floor-zone-indoor { grid-column: 3 / span 6; grid-row: 1 / span 4; }
+  .floor-zone-bar { grid-column: 9 / span 4; grid-row: 1 / span 2; }
+  .floor-zone-outdoor { grid-column: 3 / span 6; grid-row: 5 / span 2; }
+  .floor-zone-vip { grid-column: 9 / span 4; grid-row: 3 / span 4; }
+
+  .floor-service-island,
+  .floor-walkway {
+    background-image: radial-gradient(rgba(255,255,255,.08) 1px, transparent 1px);
+    background-size: 12px 12px;
+  }
+
+  .floor-table { backdrop-filter: blur(8px); }
+</style>
