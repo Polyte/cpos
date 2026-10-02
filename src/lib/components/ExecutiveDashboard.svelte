@@ -1,14 +1,11 @@
 <script lang="ts">
   import {
     Globe,
-    Map as MapIcon,
     Activity as ActivityIcon,
     Package as PackageIcon,
     DollarSign,
     ChevronRight,
-    Target,
     X,
-    CheckCircle2,
     ShieldCheck as ShieldCheckIcon,
     Wifi as WifiIcon,
     Database,
@@ -24,7 +21,6 @@
     Wrench,
     UtensilsCrossed,
     Zap,
-    Signal,
     Download,
     FileSpreadsheet,
     FileText,
@@ -35,6 +31,9 @@
     Monitor,
     MapPin,
     Navigation,
+    ArrowUpDown,
+    Search,
+    Clock,
   } from 'lucide-svelte';
   import { Bar, Pie } from 'svelte-chartjs';
   import {
@@ -79,13 +78,21 @@
   }
 
   // â”€â”€ State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  let activeView   = $state<'command' | 'map' | 'roadmap'>('command');
+  let activeView   = $state<'command' | 'map'>('command');
   let loading      = $state(true);
   let refreshing   = $state(false);
+  let loadError    = $state<string | null>(null);
   let dashData     = $state<any>(null);
   let selectedTenant = $state<string | null>(null);
-  let selectedNode   = $state<number | null>(null);
-  let showTargetModal = $state(false);
+  let selectedNode   = $state<string | null>(null);
+  let productImporterEnabled = $state(false);
+  let productImporterRunning = $state(false);
+  let productImportPushing = $state(false);
+  let productImporterOffset = $state(0);
+  let productImporterMessage = $state('');
+  let importBannerDismissed = $state(false);
+  let mapPanelOpen = $state(true);
+  const productImporterIntervalMs = 15 * 60 * 1000;
 
   // Export state
   let showExportModal = $state(false);
@@ -106,23 +113,28 @@
   let devices        = $state<any[]>([]);
   let loadingDevices = $state(false);
 
-  // Target modal data
-  let targetData = $state({ store: '', monthlyTarget: '', category: 'General' });
+  // Tenant table: search + sorting
+  let tenantQuery = $state('');
+  let sortKey     = $state<'todaySales' | 'totalSales' | 'todayTxCount' | 'stockValue' | 'lowStockCount' | 'activeShifts'>('todaySales');
+  let sortDir     = $state<'asc' | 'desc'>('desc');
 
-  // Roadmap (static)
-  const roadmap = [
-    { phase: 'Phase 1: Foundation', time: 'Now - 6 months',   goals: ['Core POS', '5 Pilot Stores', 'Basic Reporting', '20 Clients'],                              status: 'Current'  },
-    { phase: 'Phase 2: Scale',      time: '7 - 12 months',    goals: ['Mobile POS App', 'Supplier Portal', 'Advanced Analytics', '100 Stores'],                   status: 'Upcoming' },
-    { phase: 'Phase 3: Expand',     time: '13 - 18 months',   goals: ['Loyalty Program', 'E-commerce Sync', 'International Expansion', '250 Stores'],              status: 'Future'   },
-    { phase: 'Phase 4: Dominate',   time: '19 - 24 months',   goals: ['AI Inventory Prediction', 'Marketplace Integrations', 'Franchise Platform', '500+ Stores'], status: 'Vision'   },
-  ];
+  // Audit log: severity filter + search
+  let auditQuery    = $state('');
+  let auditSeverity = $state<'all' | 'ERROR' | 'WARNING' | 'INFO'>('all');
 
-  const nodes = [
-    { id: 1, name: 'Sandton Hub',      status: 'Online',  load: 82, lat: -26.1076, lng: 28.0567 },
-    { id: 2, name: 'Cape Town Port',   status: 'Online',  load: 45, lat: -33.9249, lng: 18.4241 },
-    { id: 3, name: 'Durban Terminal',  status: 'Warning', load: 94, lat: -29.8587, lng: 31.0218 },
-    { id: 4, name: 'Pretoria HQ',      status: 'Online',  load: 12, lat: -25.7479, lng: 28.2293 },
-  ];
+  function toggleSort(key: typeof sortKey) {
+    if (sortKey === key) sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+    else { sortKey = key; sortDir = 'desc'; }
+  }
+
+  // Merchant markers are derived from tenants (live dashboard data)
+  // in the mapReady effect below.
+  const MERCHANT_FALLBACK_COORDS: Record<string, { lat: number; lng: number }> = {
+    'merchant:M1': { lat: -26.1076, lng: 28.0567 },
+    'merchant:M2': { lat: -33.9249, lng: 18.4241 },
+    'merchant:M3': { lat: -27.7667, lng: 26.7833 },
+    'merchant:M4': { lat: -26.1405, lng: 28.0683 },
+  };
 
   // â”€â”€ Derived values â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let global_      = $derived(dashData?.global || {});
@@ -140,6 +152,80 @@
     tenants
       .map((t: any) => ({ name: t.type, value: t.totalSales || 0, color: t.color }))
       .filter((d: any) => d.value > 0)
+  );
+
+  // Needs-attention items: critical stock (≤3 units) + error audit events
+  let attentionItems = $derived([
+    ...stockAlerts
+      .filter((a: any) => a.severity === 'critical')
+      .map((a: any) => ({ kind: 'stock' as const, ...a })),
+    ...recentAudit
+      .filter((e: any) => e.severity === 'ERROR')
+      .slice(0, 5)
+      .map((e: any) => ({ kind: 'audit' as const, ...e })),
+  ]);
+
+  // Payment mix: today's card vs cash per tenant + global split
+  let paymentMix = $derived(
+    tenants.map((t: any) => {
+      const card = Number(t.cardSales || 0);
+      const cash = Number(t.cashSales || 0);
+      const total = card + cash;
+      return { ...t, card, cash, cardPct: total > 0 ? Math.round((card / total) * 100) : 0 };
+    })
+  );
+  let globalCardTotal = $derived(paymentMix.reduce((s: number, t: any) => s + t.card, 0));
+  let globalCashTotal = $derived(paymentMix.reduce((s: number, t: any) => s + t.cash, 0));
+  let globalCardPct = $derived(
+    globalCardTotal + globalCashTotal > 0
+      ? Math.round((globalCardTotal / (globalCardTotal + globalCashTotal)) * 100)
+      : 0
+  );
+
+  // Tenant performance table: search + sortable
+  let visibleTenants = $derived(
+    tenants
+      .filter((t: any) => {
+        const q = tenantQuery.trim().toLowerCase();
+        if (!q) return true;
+        return [t.name, t.type, t.merchantId].some((v: any) => String(v || '').toLowerCase().includes(q));
+      })
+      .slice()
+      .sort((a: any, b: any) => {
+        const av = Number(a[sortKey] || 0);
+        const bv = Number(b[sortKey] || 0);
+        return sortDir === 'desc' ? bv - av : av - bv;
+      })
+  );
+
+  // Shift board: everyone currently on shift, with time on shift
+  function shiftDuration(startTime: string): string {
+    const mins = Math.max(0, Math.floor((Date.now() - new Date(startTime).getTime()) / 60000));
+    if (mins < 60) return `${mins}m`;
+    const h = Math.floor(mins / 60);
+    return `${h}h ${mins % 60}m`;
+  }
+  let shiftBoard = $derived(
+    tenants.flatMap((t: any) =>
+      (t.activeStaff || []).map((s: any) => ({
+        ...s,
+        merchantId: t.merchantId,
+        merchantType: t.type,
+        color: t.color,
+        onShiftFor: s.startTime ? shiftDuration(s.startTime) : '—',
+      }))
+    )
+  );
+
+  // Audit log: severity filter + text search
+  let filteredAudit = $derived(
+    recentAudit.filter((e: any) => {
+      if (auditSeverity !== 'all' && (e.severity || 'INFO') !== auditSeverity) return false;
+      const q = auditQuery.trim().toLowerCase();
+      if (!q) return true;
+      return [e.action, e.merchantType, e.merchantId, typeof e.details === 'string' ? e.details : JSON.stringify(e.details || '')]
+        .some((v: any) => String(v || '').toLowerCase().includes(q));
+    })
   );
 
   // svelte-chartjs data objects
@@ -217,17 +303,21 @@
   // â”€â”€ Data loading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function loadDashboard(silent = false) {
     try {
-      if (!silent) loading = true;
+      if (!silent) { loading = true; loadError = null; }
       else refreshing = true;
 
       const data = await api.getAdminDashboard();
       if (data && !data.error) {
         dashData = data;
+        loadError = null;
       } else {
+        const msg = data?.error || data?.details || 'Dashboard endpoint returned an error';
+        loadError = String(msg);
         if (!silent) toast.error('Failed to load cross-tenant data');
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('[ExecDash] Load error:', e);
+      loadError = e?.message || 'Network error connecting to Roxton Cloud';
       if (!silent) toast.error('Network error connecting to Roxton Cloud');
     } finally {
       loading = false;
@@ -248,9 +338,160 @@
     }
   }
 
+  async function loadProductImporterSettings() {
+    const settings = await api.getProductImportSettings();
+    productImporterEnabled = Boolean(settings?.enabled);
+    productImporterOffset = Number(settings?.offset || 0);
+  }
+
+  async function runProductImporterBatch() {
+    if (!productImporterEnabled || productImporterRunning) return;
+    productImporterRunning = true;
+    try {
+      const result = await api.importLoyaltyHubCatalog(productImporterOffset, 500);
+      if (!result.success) throw new Error(result.error || 'Automatic product import failed');
+      const nextOffset = result.hasMore ? productImporterOffset + Number(result.discovered || 0) : 0;
+      productImporterOffset = nextOffset;
+      await api.setProductImportSettings(true, nextOffset);
+      productImporterMessage = result.hasMore
+        ? `Imported ${Number(result.imported || 0).toLocaleString()} products; next batch is queued.`
+        : `Import cycle complete: ${Number(result.imported || 0).toLocaleString()} products processed.`;
+    } catch (e: any) {
+      productImporterMessage = e?.message || 'Automatic product import failed';
+    } finally {
+      productImporterRunning = false;
+    }
+  }
+
+  // Background import via the job queue (RabbitMQ when configured, inline
+  // fallback). Falls back to direct batches when the backend predates /jobs.
+  let importJobPct = $state<number | null>(null);
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function pushImportBatchesDirect() {
+    const status = await api.getProductCloudImportStatus();
+    const cursor = status?.status === 'running' && typeof status?.nextCursor === 'string' ? status.nextCursor : null;
+    let pushed = 0;
+    let processed = 0;
+    let cursorNow = cursor;
+    // Push up to 5000 rows per click, same safeguard as the Product Cloud import
+    for (let i = 0; i < 10; i += 1) {
+      const result = await api.importLoyaltyHubCatalog(cursorNow, 500);
+      if (!result.success) throw new Error(result.error || 'LoyaltyHub import push failed');
+      pushed += Number(result.imported || 0);
+      processed = Number(result.processedRows || processed);
+      importJobPct = Math.min(99, Math.round(((i + 1) / 10) * 100));
+      productImporterMessage = `Pushing… batch ${i + 1}: ${pushed.toLocaleString()} products so far.`;
+      if (!result.hasMore || !result.nextCursor) break;
+      cursorNow = String(result.nextCursor);
+    }
+    return { pushed, processed };
+  }
+
+  async function pushLoyaltyHubImports() {
+    if (productImportPushing) return;
+    productImportPushing = true;
+    importJobPct = 0;
+    productImporterMessage = 'Pushing processed LoyaltyHub imports to the database…';
+    try {
+      // Preferred path: background job with polled progress.
+      let jobId: string | null = null;
+      try {
+        const created = await api.createJob('loyaltyhub-import', { limit: 500, maxBatches: 10 });
+        if (created?.success && created?.job?.id) jobId = String(created.job.id);
+        else if (created && !String(created?.error || '').match(/404|not found|failed \(HTTP 404/i) && created?.error) {
+          throw new Error(created.error);
+        }
+      } catch (e: any) {
+        // /jobs missing on old backends -> direct fallback below (jobId stays null).
+        if (e?.message && !String(e.message).match(/404|Failed to fetch|Network/i)) throw e;
+      }
+
+      if (!jobId) {
+        const { pushed, processed } = await pushImportBatchesDirect();
+        importJobPct = 100;
+        productImporterMessage = `Pushed ${pushed.toLocaleString()} products from LoyaltyHub (${processed.toLocaleString()} rows processed) into the database.`;
+        toast.success(`Pushed ${pushed.toLocaleString()} LoyaltyHub products to the database`);
+        return;
+      }
+
+      for (let i = 0; i < 150; i += 1) {
+        await sleep(2000);
+        const cur = await api.getJob(jobId);
+        const job = cur?.job;
+        if (!job) throw new Error('Import job disappeared from the queue');
+        const p = job.progress || {};
+        if (typeof p.total === 'number' && p.total > 0) {
+          importJobPct = Math.min(99, Math.round((Number(p.processed || 0) / p.total) * 100));
+        } else if (Number(p.processed || 0) > 0) {
+          importJobPct = Math.min(95, 10 + Math.round(Number(p.processed) / 500));
+        }
+        productImporterMessage = `${p.message || `Import ${job.status}…`} (via ${job.backend === 'rabbitmq' ? 'RabbitMQ' : 'background worker'})`;
+        if (job.status === 'complete') {
+          const pushed = Number(job.result?.pushed || 0);
+          const processed = Number(job.result?.processedRows || p.processed || 0);
+          importJobPct = 100;
+          productImporterMessage = `Pushed ${pushed.toLocaleString()} products from LoyaltyHub (${processed.toLocaleString()} rows processed) into the database.`;
+          toast.success(`Pushed ${pushed.toLocaleString()} LoyaltyHub products to the database`);
+          loadDashboard(true);
+          return;
+        }
+        if (job.status === 'failed') throw new Error(job.error || 'Import job failed');
+      }
+      throw new Error('Import job timed out after 5 minutes — check its status and retry.');
+    } catch (e: any) {
+      productImporterMessage = e?.message || 'LoyaltyHub import push failed';
+      toast.error(productImporterMessage);
+    } finally {
+      productImportPushing = false;
+      setTimeout(() => { importJobPct = null; }, 4000);
+    }
+  }
+
+  async function toggleProductImporter() {
+    const next = !productImporterEnabled;
+    importBannerDismissed = false;
+    const saved = await api.setProductImportSettings(next, next ? productImporterOffset : 0);
+    if (saved?.error) {
+      toast.error(saved.error);
+      return;
+    }
+    productImporterEnabled = next;
+    if (!next) {
+      productImporterOffset = 0;
+      productImporterMessage = 'Automatic product import is off.';
+      toast.success('Automatic product importer disabled');
+    } else {
+      productImporterMessage = 'Automatic product import is on; starting a batch…';
+      toast.success('Automatic product importer enabled');
+      runProductImporterBatch();
+    }
+  }
+
   // â”€â”€ Initial load â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Dismiss overlays with Escape
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (showExportModal) showExportModal = false;
+      else if (showDevices) showDevices = false;
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  // ── Derived: attention items, payment mix, sorted tenants, shifts, audit ──
+
   $effect(() => {
     loadDashboard();
+    loadProductImporterSettings();
+  });
+
+  $effect(() => {
+    if (!productImporterEnabled) return;
+    const interval = setInterval(runProductImporterBatch, productImporterIntervalMs);
+    return () => clearInterval(interval);
   });
 
   // â”€â”€ Auto-refresh (paused when SSE active) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -334,6 +575,9 @@
   // â”€â”€ Leaflet map â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let mapEl: HTMLDivElement | null = $state(null);
   let leafletMapInstance: L.Map | null = null;
+  let merchantLayer: L.LayerGroup | null = null;
+  let mapReady = $state(false);
+  let markerById = new Map<string, L.Marker>();
 
   $effect(() => {
     if (activeView !== 'map') return;
@@ -350,67 +594,155 @@
       });
       leafletMapInstance = map;
 
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        subdomains: 'abc',
+        // Load faster: keep more tiles around the viewport, skip intermediate
+        // zoom tiles, and keep fetches flowing during pan/zoom.
+        keepBuffer: 4,
+        updateWhenIdle: false,
+        updateWhenZooming: false,
+        crossOrigin: true,
         attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       }).addTo(map);
 
-      nodes.forEach(node => {
-        const isOnline = node.status === 'Online';
-        const markerIcon = L.divIcon({
-          className: '',
-          html: `<div style="
-            width:32px;height:32px;border-radius:50%;
-            background:${isOnline ? '#4f46e5' : '#f59e0b'};
-            border:4px solid white;
-            box-shadow:0 0 20px ${isOnline ? 'rgba(99,102,241,0.6)' : 'rgba(245,158,11,0.6)'},0 0 40px ${isOnline ? 'rgba(99,102,241,0.3)' : 'rgba(245,158,11,0.3)'};
-            cursor:pointer;transition:transform 0.2s;
-          "></div>`,
-          iconSize:    [32, 32],
-          iconAnchor:  [16, 16],
-          popupAnchor: [0, -20],
-        });
-
-        const marker = L.marker([node.lat, node.lng], { icon: markerIcon }).addTo(map);
-        marker.bindPopup(`
-          <div style="padding:8px;min-width:200px;font-family:'JetBrains Mono',monospace">
-            <p style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;color:${isOnline ? '#4f46e5' : '#f59e0b'};margin-bottom:4px">
-              ${node.status}
-            </p>
-            <h4 style="font-size:16px;font-weight:900;color:#171717;margin-bottom:12px">
-              ${node.name}
-            </h4>
-            <div>
-              <div style="display:flex;justify-content:space-between;font-size:10px;font-weight:900;text-transform:uppercase;color:#737373;margin-bottom:6px">
-                <span>Current Load</span><span>${node.load}%</span>
-              </div>
-              <div style="height:6px;background:#f5f5f5;border-radius:999px;overflow:hidden">
-                <div style="height:100%;background:${node.load > 90 ? '#ef4444' : node.load > 70 ? '#f59e0b' : '#4f46e5'};width:${node.load}%;border-radius:999px;transition:width 0.5s"></div>
-              </div>
-              <p style="font-size:9px;color:#a3a3a3;margin-top:6px">
-                Latency: ${node.load < 50 ? '12ms' : node.load < 80 ? '28ms' : '45ms'} &bull; Uptime: 99.${node.load < 90 ? '99' : '87'}%
-              </p>
-            </div>
-          </div>
-        `);
-        marker.on('click', () => {
-          selectedNode = selectedNode === node.id ? null : node.id;
-        });
-      });
+      merchantLayer = L.layerGroup().addTo(map);
+      mapReady = true;
 
       setTimeout(() => map.invalidateSize(), 100);
     }, 50);
 
     return () => {
       clearTimeout(timer);
+      mapReady = false;
+      markerById.clear();
       if (leafletMapInstance) {
         leafletMapInstance.remove();
         leafletMapInstance = null;
+        merchantLayer = null;
       }
     };
   });
 
+  // Plot live merchants as dots on the map; each dot opens a popup with merchant info
+  $effect(() => {
+    if (activeView !== 'map') return;
+    if (!mapReady || !merchantLayer) return;
+    const liveTenants = tenants; // reactive dependency
+    const layer = merchantLayer;
+
+    markerById.clear();
+    layer.clearLayers();
+
+    liveTenants.forEach((m: any) => {
+      // Prefer server-provided coords; fall back to local coords so dots show
+      // even if the deployed function hasn't been updated yet.
+      const fallback = MERCHANT_FALLBACK_COORDS[m.merchantId];
+      const lat = typeof m.lat === 'number' ? m.lat : fallback?.lat;
+      const lng = typeof m.lng === 'number' ? m.lng : fallback?.lng;
+      if (typeof lat !== 'number' || typeof lng !== 'number') return;
+
+      const markerIcon = L.divIcon({
+        className: '',
+        html: `<div style="
+          width:18px;height:18px;border-radius:50%;
+          background:${m.color};
+          border:3px solid white;
+          box-shadow:0 0 12px ${m.color},0 0 24px ${m.color}66;
+          cursor:pointer;
+        "></div>`,
+        iconSize:    [18, 18],
+        iconAnchor:  [9, 9],
+        popupAnchor: [0, -12],
+      });
+
+      const marker = L.marker([lat, lng], { icon: markerIcon }).addTo(layer);
+      marker.bindPopup(`
+        <div style="padding:8px;min-width:220px;font-family:'JetBrains Mono',monospace">
+          <p style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;color:${m.color};margin-bottom:4px">
+            ${m.type}
+          </p>
+          <h4 style="font-size:16px;font-weight:900;color:#171717;margin-bottom:12px">
+            ${m.name}
+          </h4>
+          <div style="font-size:11px;color:#525252;line-height:1.7">
+            <div><strong>Today:</strong> R ${Number(m.todaySales || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })} &bull; ${m.todayTxCount ?? 0} txns</div>
+            <div><strong>All time:</strong> R ${Number(m.totalSales || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })} &bull; ${m.allTimeTxCount ?? 0} txns</div>
+            <div><strong>Active shifts:</strong> ${m.activeShifts ?? 0} &bull; <strong>Avg basket:</strong> R ${Number(m.avgBasket || 0).toFixed(2)}</div>
+            <div><strong>Stock value:</strong> R ${Number(m.stockValue || 0).toLocaleString()} &bull; <strong>Low stock:</strong> ${m.lowStockCount ?? 0} items</div>
+          </div>
+        </div>
+      `);
+      marker.on('click', () => {
+        selectedNode = m.merchantId;
+      });
+      markerById.set(m.merchantId, marker);
+    });
+  });
+
   // â”€â”€ Export â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Background export via the job queue: submit, poll, then download the
+  // artifact the worker stored on the job record.
+  let exportJobRunning = $state(false);
+
+  function downloadCsvArtifact(csv: string) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `roxton_report_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleQueuedExport() {
+    if (exporting || exportJobRunning) return;
+    exportJobRunning = true;
+    try {
+      const created = await api.createJob('report-export', {
+        format: exportFormat,
+        dateFrom: exportDateFrom || undefined,
+        dateTo: exportDateTo || undefined,
+        tenantFilter: exportTenant,
+      });
+      if (!created?.success || !created?.job?.id) {
+        throw new Error(created?.error || 'Background export submission failed');
+      }
+      const jobId = String(created.job.id);
+      toast.success('Export queued — preparing your file in the background');
+      for (let i = 0; i < 90; i += 1) {
+        await sleep(2000);
+        const cur = await api.getJob(jobId);
+        const job = cur?.job;
+        if (!job) throw new Error('Export job disappeared from the queue');
+        if (job.status === 'complete') {
+          const artifact = job.result?.artifact;
+          if (exportFormat === 'csv' && typeof artifact === 'string') {
+            downloadCsvArtifact(artifact);
+            toast.success('CSV report downloaded');
+          } else if (exportFormat === 'pdf' && artifact) {
+            generatePDF(artifact);
+            toast.success('PDF report generated');
+          } else {
+            throw new Error('Export finished without a downloadable artifact');
+          }
+          showExportModal = false;
+          return;
+        }
+        if (job.status === 'failed') throw new Error(job.error || 'Background export failed');
+      }
+      throw new Error('Background export timed out — narrow the range and retry.');
+    } catch (e: any) {
+      console.error('[Export] Queued export error:', e);
+      toast.error(e?.message || 'Background export failed');
+    } finally {
+      exportJobRunning = false;
+    }
+  }
+
   async function handleExport() {
     exporting = true;
     try {
@@ -564,50 +896,62 @@
     doc.save(`roxton_report_${new Date().toISOString().split('T')[0]}.pdf`);
   }
 
-  function handleSetTarget() {
-    toast.success(`Sales target of R ${parseFloat(targetData.monthlyTarget).toLocaleString()} set for ${targetData.store}.`);
-    showTargetModal = false;
-  }
 </script>
 
 <!-- â”€â”€ Loading splash â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
 {#if loading && !dashData}
-  <div class="flex h-full items-center justify-center p-20">
-    <div class="text-center space-y-4">
-      <Loader2 size={32} class="animate-spin text-indigo-500 mx-auto" />
-      <p class="text-[10px] font-black uppercase tracking-widest text-neutral-400">Aggregating Cross-Tenant Intelligence...</p>
+  <div class="executive-dashboard dashboard-shell p-4 sm:p-6 lg:p-8 space-y-6 max-w-[1800px] mx-auto" aria-busy="true" aria-label="Loading dashboard">
+    <div class="rounded-[28px] bg-slate-950 px-6 py-6 lg:px-8 lg:py-7 shadow-xl shadow-slate-950/10 space-y-3">
+      <div class="skeleton-shimmer h-3 w-48 rounded-full"></div>
+      <div class="skeleton-shimmer h-8 w-72 max-w-full rounded-xl"></div>
+      <div class="skeleton-shimmer h-4 w-56 max-w-full rounded-lg"></div>
     </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6" aria-hidden="true">
+      {#each [0, 1, 2, 3] as i (i)}
+        <div class="bg-white dark:bg-neutral-900 p-6 lg:p-7 rounded-2xl border border-slate-200/80 dark:border-neutral-800 space-y-4">
+          <div class="skeleton-shimmer h-12 w-12 rounded-2xl"></div>
+          <div class="skeleton-shimmer h-3 w-24 rounded-full"></div>
+          <div class="skeleton-shimmer h-8 w-3/4 rounded-lg"></div>
+          <div class="skeleton-shimmer h-3 w-1/2 rounded-full"></div>
+        </div>
+      {/each}
+    </div>
+    <p class="text-center text-[10px] font-black uppercase tracking-widest text-neutral-400">Aggregating Cross-Tenant Intelligence...</p>
   </div>
 {:else}
-<div class="dashboard-shell p-4 sm:p-6 lg:p-8 space-y-6 animate-in fade-in duration-700 max-w-[1800px] mx-auto">
+<div class="executive-dashboard dashboard-shell p-4 sm:p-6 lg:p-8 space-y-6 animate-in fade-in duration-700 max-w-[1800px] mx-auto">
 
   <!-- â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-  <div class="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
-    <div>
-      <div class="flex items-center gap-2 mb-1">
-        <Globe size={16} class="text-indigo-500" />
-        <span class="text-[10px] font-black uppercase tracking-widest text-indigo-500">Clinton's Command Centre</span>
+  <div class="executive-hero relative overflow-hidden flex flex-col lg:flex-row lg:items-end justify-between gap-5 rounded-[28px] bg-slate-950 px-6 py-6 lg:px-8 lg:py-7 text-white shadow-xl shadow-slate-950/10">
+    <div class="absolute -right-20 -top-28 h-72 w-72 rounded-full bg-amber-400/10 blur-3xl pointer-events-none"></div>
+    <div class="absolute -left-16 -bottom-24 h-56 w-56 rounded-full bg-indigo-500/15 blur-3xl pointer-events-none"></div>
+    <div class="relative z-10">
+      <div class="relative flex items-center gap-2 mb-2">
+        <span class="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,.75)]"></span>
+        <span class="text-[10px] font-black uppercase tracking-[0.22em] text-amber-300">Clinton POS · Executive overview</span>
         {#if refreshing}
-          <Loader2 size={12} class="animate-spin text-indigo-400" />
+          <Loader2 size={12} class="animate-spin text-amber-200" />
         {/if}
       </div>
-      <h2 class="text-3xl lg:text-4xl font-black tracking-tighter dark:text-neutral-100">Cross-Tenant Intelligence</h2>
-      <p class="text-neutral-500 font-medium text-sm mt-0.5">
-        Real-time aggregation across {global_?.merchantCount ?? 4} tenants &bull; {global_?.activeShifts ?? 0} staff on shift
+      <h2 class="relative text-3xl lg:text-4xl font-black tracking-tight text-white">Operations at a glance</h2>
+      <p class="relative text-slate-300 font-medium text-sm mt-2">
+        {global_?.merchantCount ?? 4} locations · {global_?.activeShifts ?? 0} active shifts
         {#if dashData?.generatedAt}
-          <span class="text-neutral-400 ml-2 text-xs">Updated {timeAgo(dashData.generatedAt)}</span>
+          <span class="text-slate-400 ml-2 text-xs">Updated {timeAgo(dashData.generatedAt)}</span>
         {/if}
       </p>
     </div>
 
-    <div class="flex items-center gap-2 flex-wrap">
+    <div class="relative flex items-center gap-2 flex-wrap lg:justify-end max-w-4xl">
       <!-- View switcher -->
-      <div class="flex bg-white dark:bg-neutral-800 p-1 rounded-2xl border border-neutral-200 dark:border-neutral-700 shadow-sm">
-        {#each [{ key: 'command', label: 'Command' }, { key: 'map', label: 'Node Map' }, { key: 'roadmap', label: 'Roadmap' }] as v}
+      <div class="flex bg-white/10 p-1 rounded-2xl border border-white/15 shadow-sm" role="tablist" aria-label="Dashboard views">
+        {#each [{ key: 'command', label: 'Command' }, { key: 'map', label: 'Merchant Map' }] as v}
           <button
             onclick={() => activeView = v.key as any}
-            class={`px-5 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
-              activeView === v.key ? 'bg-neutral-900 dark:bg-indigo-600 text-white shadow-lg' : 'text-neutral-400 hover:text-neutral-600'
+            role="tab"
+            aria-selected={activeView === v.key}
+            class={`px-5 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all focus-visible:outline-2 focus-visible:outline-amber-300 ${
+              activeView === v.key ? 'bg-white text-slate-950 shadow-lg' : 'text-slate-300 hover:text-white hover:bg-white/10'
             }`}
           >
             {v.label}
@@ -617,25 +961,45 @@
 
       <button
         onclick={() => loadDashboard(true)}
-        class="p-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-500 hover:text-indigo-600 transition-all"
+        class="p-2.5 rounded-xl border border-white/15 bg-white/10 text-slate-200 hover:text-white hover:bg-white/20 transition-all focus-visible:outline-2 focus-visible:outline-amber-300"
         title="Refresh data"
+        aria-label="Refresh dashboard data"
       >
         <RefreshCw size={16} class={refreshing ? 'animate-spin' : ''} />
       </button>
+    </div>
+  </div>
 
+  <!-- Action toolbar: data + workspace actions, separated from the hero for scanability -->
+  <div class="flex items-center gap-2 flex-wrap" role="toolbar" aria-label="Dashboard actions">
+    <div class="flex items-center gap-2 flex-wrap">
+      <span class="text-[9px] font-black uppercase tracking-[0.2em] text-neutral-400 mr-1 hidden sm:inline">Catalogue</span>
       <button
-        onclick={async () => {
-          const res = await api.seed();
-          if (res.success) { toast.success('System re-seeded'); loadDashboard(); }
-        }}
-        class="px-4 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[10px] font-black uppercase tracking-widest text-neutral-400 hover:text-neutral-900 dark:hover:text-white transition-all"
+        onclick={toggleProductImporter}
+        aria-pressed={productImporterEnabled}
+        class={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all focus-visible:outline-2 focus-visible:outline-indigo-500 ${productImporterEnabled ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600' : 'border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-400 hover:text-indigo-600'}`}
+        title={productImporterEnabled ? 'Disable automatic Product Cloud importing' : 'Enable automatic Product Cloud importing'}
       >
-        Sync Cloud
+        <Database size={14} class={productImporterRunning ? 'animate-pulse' : ''} />
+        Auto Import {productImporterEnabled ? 'On' : 'Off'}
       </button>
 
       <button
+        onclick={() => { importBannerDismissed = false; pushLoyaltyHubImports(); }}
+        disabled={productImportPushing}
+        class="flex items-center gap-2 px-4 py-2.5 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-500 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-indigo-500"
+        title="Push processed LoyaltyHub imports into the product database"
+      >
+        <Database size={14} class={productImportPushing ? 'animate-pulse' : ''} />
+        {productImportPushing ? 'Pushing…' : 'Push Imports'}
+      </button>
+    </div>
+
+    <div class="flex items-center gap-2 flex-wrap sm:ml-auto">
+      <span class="text-[9px] font-black uppercase tracking-[0.2em] text-neutral-400 mr-1 hidden sm:inline">Workspace</span>
+      <button
         onclick={() => showExportModal = true}
-        class="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[10px] font-black uppercase tracking-widest text-neutral-500 hover:text-emerald-600 dark:hover:text-emerald-400 transition-all"
+        class="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[10px] font-black uppercase tracking-widest text-neutral-500 hover:text-emerald-600 dark:hover:text-emerald-400 transition-all focus-visible:outline-2 focus-visible:outline-emerald-500"
       >
         <Download size={14} /> Export
       </button>
@@ -643,7 +1007,8 @@
       <!-- SSE toggle -->
       <button
         onclick={() => sseEnabled = !sseEnabled}
-        class={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border ${
+        aria-pressed={sseEnabled}
+        class={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border focus-visible:outline-2 focus-visible:outline-emerald-500 ${
           sseEnabled
             ? sseConnected
               ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500'
@@ -665,29 +1030,80 @@
       </button>
 
       <button
-        onclick={() => showTargetModal = true}
-        class="flex items-center gap-2 px-5 py-2.5 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl transition-all bg-indigo-600 hover:bg-indigo-700"
-      >
-        <Target size={14} /> Set Targets
-      </button>
-
-      <button
         onclick={() => { loadDevices(); showDevices = true; }}
-        class="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[10px] font-black uppercase tracking-widest text-neutral-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-all"
+        class="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[10px] font-black uppercase tracking-widest text-neutral-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-all focus-visible:outline-2 focus-visible:outline-indigo-500"
       >
         <Monitor size={14} /> Devices
       </button>
     </div>
   </div>
+  {#if refreshing}
+    <div class="h-1 -mt-4 rounded-full overflow-hidden bg-neutral-100 dark:bg-neutral-800" role="progressbar" aria-label="Refreshing dashboard">
+      <div class="h-full w-1/3 rounded-full bg-indigo-500 refreshing-slide"></div>
+    </div>
+  {/if}
 
   <!-- â”€â”€ COMMAND VIEW â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+  {#if (productImporterEnabled || productImporterMessage) && !importBannerDismissed}
+    <div role="status" aria-live="polite" class={`rounded-2xl border px-4 py-3 text-xs font-semibold ${productImporterEnabled ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300' : 'border-neutral-200 bg-neutral-50 text-neutral-500 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-300'}`}>
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span class="flex items-center gap-2 min-w-0">
+          {#if productImporterRunning || productImportPushing}
+            <Loader2 size={14} class="animate-spin shrink-0" aria-hidden="true" />
+          {/if}
+          <span class="truncate">{productImporterMessage || 'Automatic Product Cloud importing is enabled.'}</span>
+        </span>
+        {#if importJobPct !== null}
+          <span class="flex items-center gap-2 shrink-0 w-40" role="progressbar" aria-valuenow={importJobPct} aria-valuemin={0} aria-valuemax={100} aria-label="Import progress">
+            <span class="flex-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+              <span class="block h-full rounded-full bg-emerald-500 transition-all duration-500" style={`width:${importJobPct}%`}></span>
+            </span>
+            <span class="text-[10px] font-black tabular-nums">{importJobPct}%</span>
+          </span>
+        {/if}
+        <span class="flex items-center gap-3 shrink-0">
+          {#if productImporterEnabled}<span class="font-mono text-[10px] uppercase tracking-widest">Next offset: {productImporterOffset.toLocaleString()}</span>{/if}
+          <button
+            onclick={() => importBannerDismissed = true}
+            class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+            title="Dismiss"
+            aria-label="Dismiss import status message"
+          >
+            <X size={14} />
+          </button>
+        </span>
+      </div>
+    </div>
+  {/if}
+
+  {#if !loading && loadError && !dashData}
+    <div role="alert" class="rounded-[28px] border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-500/5 p-8 sm:p-10 text-center space-y-4">
+      <div class="w-14 h-14 mx-auto rounded-2xl bg-red-500/10 text-red-500 flex items-center justify-center">
+        <AlertTriangle size={28} />
+      </div>
+      <div>
+        <h3 class="text-lg font-black tracking-tight dark:text-neutral-100">Dashboard data isn't loading</h3>
+        <p class="text-sm text-neutral-500 font-medium mt-1 max-w-xl mx-auto break-words">{loadError}</p>
+        <p class="text-[11px] text-neutral-400 font-mono mt-2">Check the browser console (F12) for the failing request URL.</p>
+      </div>
+      <button
+        onclick={() => loadDashboard()}
+        class="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-[10px] font-black uppercase tracking-widest shadow-xl transition-all"
+      >
+        <RefreshCw size={14} /> Retry
+      </button>
+    </div>
+  {/if}
+
   {#if activeView === 'command'}
 
     <!-- Tenant Profile Strip -->
-    <div class="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+    <div class="flex gap-2 overflow-x-auto pb-1 scrollbar-hide snap-x" role="tablist" aria-label="Filter by tenant">
       <button
         onclick={() => selectedTenant = null}
-        class={`shrink-0 flex items-center gap-2 px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border ${
+        role="tab"
+        aria-selected={!selectedTenant}
+        class={`shrink-0 snap-start flex items-center gap-2 px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border focus-visible:outline-2 focus-visible:outline-indigo-500 ${
           !selectedTenant
             ? 'bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 border-neutral-900 dark:border-white shadow-lg'
             : 'bg-white dark:bg-neutral-800 text-neutral-500 border-neutral-200 dark:border-neutral-700 hover:border-neutral-400'
@@ -702,7 +1118,9 @@
         {@const isSelected = selectedTenant === t.merchantId}
         <button
           onclick={() => selectedTenant = isSelected ? null : t.merchantId}
-          class={`shrink-0 flex items-center gap-2 px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border ${
+          role="tab"
+          aria-selected={isSelected}
+          class={`shrink-0 snap-start flex items-center gap-2 px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border focus-visible:outline-2 focus-visible:outline-indigo-500 ${
             isSelected
               ? 'text-white shadow-lg'
               : 'bg-white dark:bg-neutral-800 text-neutral-500 border-neutral-200 dark:border-neutral-700 hover:border-neutral-400'
@@ -718,38 +1136,65 @@
       {/each}
     </div>
 
+    <!-- Needs attention: critical stock + error audit events -->
+    {#if attentionItems.length > 0}
+      <section aria-label="Needs attention" class="rounded-2xl border border-red-200 dark:border-red-500/30 bg-red-50/60 dark:bg-red-500/5 px-4 py-3">
+        <div class="flex items-center gap-2 mb-2">
+          <AlertTriangle size={14} class="text-red-500 shrink-0" />
+          <h3 class="text-[10px] font-black uppercase tracking-[0.2em] text-red-600 dark:text-red-400">
+            Needs attention · {attentionItems.length}
+          </h3>
+        </div>
+        <ul class="flex gap-2 overflow-x-auto pb-1 scrollbar-hide snap-x">
+          {#each attentionItems.slice(0, 10) as item (item.kind + ':' + (item.id || item.name))}
+            <li class="shrink-0 snap-start flex items-center gap-2 px-3 py-2 rounded-xl bg-white dark:bg-neutral-900 border border-red-100 dark:border-red-500/20 text-xs font-semibold text-neutral-700 dark:text-neutral-200 max-w-xs">
+              <span class="w-2 h-2 rounded-full shrink-0 {item.kind === 'stock' ? 'bg-red-500' : 'bg-amber-500'}"></span>
+              <span class="truncate">
+                {#if item.kind === 'stock'}
+                  {item.name} · {item.stock} left ({item.merchantType})
+                {:else}
+                  {(item.action || 'EVENT').replace(/_/g, ' ')} · {item.merchantType}
+                {/if}
+              </span>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
     <!-- Global KPI Cards -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-6">
       {#each [
         {
-          label: selectedTenant ? `${focusTenant?.type} Sales`        : 'Global Revenue',
+          label: selectedTenant ? `${focusTenant?.type} Sales`        : 'All-time revenue',
           value: formatCurrency(selectedTenant ? (focusTenant?.totalSales   || 0) : (global_?.totalSales   || 0)),
           sub:   `Today: ${formatCurrency(selectedTenant ? (focusTenant?.todaySales || 0) : (global_?.todaySales || 0))}`,
-          icon: DollarSign,  color: '#6366f1', trend: '+12.4%',
+          icon: DollarSign,  color: '#d99c16', trend: 'Lifetime',
         },
         {
-          label: selectedTenant ? `${focusTenant?.type} Transactions` : 'Total Volume',
+          label: selectedTenant ? `${focusTenant?.type} Transactions` : 'Transactions',
           value: selectedTenant ? (focusTenant?.allTimeTxCount || 0).toLocaleString() : (global_?.totalTransactions || 0).toLocaleString(),
           sub:   `Today: ${selectedTenant ? (focusTenant?.todayTxCount || 0) : (global_?.todayTransactions || 0)} txns`,
-          icon: ShoppingBag, color: '#10b981', trend: '+5.2%',
+          icon: ShoppingBag, color: '#14966f', trend: 'All time',
         },
         {
-          label: selectedTenant ? `${focusTenant?.type} Stock Value`  : 'Portfolio Asset Value',
+          label: selectedTenant ? `${focusTenant?.type} Stock Value`  : 'Stock value',
           value: formatCurrency(selectedTenant ? (focusTenant?.stockValue   || 0) : (global_?.stockValue   || 0)),
           sub:   `${selectedTenant ? (focusTenant?.lowStockCount || 0) : (global_?.lowStockAlerts || 0)} low-stock alerts`,
-          icon: PackageIcon, color: '#f97316', trend: 'Healthy',
+          icon: PackageIcon, color: '#d97735', trend: 'Inventory',
         },
         {
-          label: selectedTenant ? `${focusTenant?.type} Staff`        : 'Operational Capacity',
+          label: selectedTenant ? `${focusTenant?.type} Staff`        : 'Active shifts',
           value: selectedTenant ? (focusTenant?.activeShifts || 0).toString() : (global_?.activeShifts || 0).toString(),
           sub:   selectedTenant ? `Avg basket: ${formatCurrency(focusTenant?.avgBasket || 0)}` : 'Nodes active across region',
-          icon: Users,       color: '#8b5cf6', trend: 'Active',
+          icon: Users,       color: '#6c72bf', trend: 'Now',
         },
       ] as stat, i}
         <div
-          class="bg-white dark:bg-neutral-900 p-8 rounded-[40px] border border-neutral-200 dark:border-neutral-800 shadow-[0_8px_30px_rgba(0,0,0,0.02)] relative overflow-hidden group hover:shadow-xl hover:-translate-y-1 transition-all"
+          class="executive-kpi bg-white dark:bg-neutral-900 p-6 lg:p-7 rounded-2xl border border-slate-200/80 dark:border-neutral-800 shadow-sm relative overflow-hidden group hover:shadow-lg hover:-translate-y-0.5 hover:border-slate-300 dark:hover:border-neutral-600 transition-all min-w-0"
         >
           <div class="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full -mr-16 -mt-16 blur-2xl group-hover:bg-indigo-500/10 transition-colors"></div>
+          <div class="absolute left-0 top-6 bottom-6 w-1 rounded-full" style={`background-color:${stat.color}`} aria-hidden="true"></div>
           <div class="flex items-center justify-between mb-6">
             <div
               class="w-12 h-12 rounded-2xl flex items-center justify-center shadow-inner transition-all border border-neutral-100 dark:border-neutral-700/50"
@@ -757,13 +1202,13 @@
             >
               <stat.icon size={24} />
             </div>
-            <div class="flex items-center gap-1.5 px-3 py-1 rounded-xl text-[10px] font-black bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/50 uppercase tracking-widest">
+            <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[9px] font-black bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-300 border border-slate-200/70 dark:border-slate-700 uppercase tracking-widest">
               {stat.trend}
             </div>
           </div>
           <p class="text-[10px] font-black text-neutral-400 uppercase tracking-[0.2em] mb-1">{stat.label}</p>
-          <h4 class="text-3xl lg:text-4xl font-black tracking-tighter text-neutral-900 dark:text-white font-mono tabular-nums">{stat.value}</h4>
-          <div class="mt-6 pt-5 border-t border-neutral-50 dark:border-neutral-800">
+          <h4 class="text-2xl sm:text-3xl lg:text-4xl font-black tracking-tighter text-neutral-900 dark:text-white font-mono tabular-nums break-words">{stat.value}</h4>
+          <div class="mt-5 pt-4 border-t border-slate-100 dark:border-neutral-800">
             <p class="text-[11px] font-bold flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
               <ActivityIcon size={14} class="opacity-50" /> {stat.sub}
             </p>
@@ -983,19 +1428,46 @@
 
       <!-- Audit trail -->
       <div class="lg:col-span-2 bg-white dark:bg-neutral-800/50 p-8 rounded-[36px] border border-neutral-100 dark:border-neutral-700/50 shadow-sm">
-        <div class="flex items-center justify-between mb-6">
+        <div class="flex flex-col sm:flex-row sm:items-center gap-3 justify-between mb-6">
           <div>
             <h3 class="text-lg font-black tracking-tight dark:text-neutral-100">Cross-Tenant Audit Trail</h3>
             <p class="text-neutral-400 text-xs font-medium">Real-time forensic events from all merchants</p>
           </div>
-          <div class="flex items-center gap-1 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-500/10 rounded-xl border border-emerald-100 dark:border-emerald-500/20">
-            <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
-            <span class="text-[9px] font-black uppercase tracking-widest text-emerald-600">Live Sync</span>
+          <div class="flex items-center gap-2 flex-wrap">
+            <div class="flex bg-neutral-100 dark:bg-neutral-700/50 p-1 rounded-xl" role="group" aria-label="Filter by severity">
+              {#each ['all', 'ERROR', 'WARNING', 'INFO'] as sev}
+                <button
+                  onclick={() => auditSeverity = sev as typeof auditSeverity}
+                  aria-pressed={auditSeverity === sev}
+                  class={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${
+                    auditSeverity === sev
+                      ? 'bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white shadow'
+                      : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200'
+                  }`}
+                >
+                  {sev === 'all' ? 'All' : sev}
+                </button>
+              {/each}
+            </div>
+            <label class="relative block">
+              <Search size={12} class="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
+              <input
+                type="search"
+                bind:value={auditQuery}
+                placeholder="Search events…"
+                aria-label="Search audit events"
+                class="bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 pl-8 pr-2 py-1.5 rounded-xl text-xs font-semibold outline-none focus:border-indigo-400 w-40 dark:text-neutral-100"
+              />
+            </label>
+            <div class="flex items-center gap-1 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-500/10 rounded-xl border border-emerald-100 dark:border-emerald-500/20">
+              <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
+              <span class="text-[9px] font-black uppercase tracking-widest text-emerald-600">Live Sync</span>
+            </div>
           </div>
         </div>
         <div class="space-y-1.5 max-h-[320px] overflow-y-auto custom-scrollbar pr-1">
-          {#if recentAudit.length > 0}
-            {#each recentAudit as evt, i (evt.id ?? i)}
+          {#if filteredAudit.length > 0}
+            {#each filteredAudit as evt, i (evt.id ?? i)}
               <div class="flex items-center gap-3 p-3 rounded-xl border border-neutral-50 dark:border-neutral-700/30 hover:bg-neutral-50 dark:hover:bg-neutral-700/20 transition-all">
                 <div class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-[10px] font-black" style={`background-color:${evt.color}15;color:${evt.color}`}>
                   {evt.merchantType?.[0] || '?'}
@@ -1027,50 +1499,183 @@
           {:else}
             <div class="py-12 text-center opacity-30">
               <ShieldCheckIcon size={32} class="mx-auto mb-3 text-neutral-400" />
-              <p class="text-[10px] font-black uppercase tracking-widest text-neutral-400">No audit events â€” system clean</p>
+              <p class="text-[10px] font-black uppercase tracking-widest text-neutral-400">
+                {auditQuery || auditSeverity !== 'all' ? 'No events match the current filters' : 'No audit events — system clean'}
+              </p>
             </div>
           {/if}
         </div>
       </div>
     </div>
 
-    <!-- Infrastructure Health -->
-    <div class="bg-white dark:bg-neutral-800/50 p-8 rounded-[36px] border border-neutral-200 dark:border-neutral-700/50 shadow-sm">
-      <div class="flex items-center justify-between mb-8">
-        <div class="flex items-center gap-4">
-          <div class="w-12 h-12 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 rounded-[20px] flex items-center justify-center">
-            <ActivityIcon size={24} />
+    <!-- Tenant performance table: searchable + sortable -->
+    <div class="bg-white dark:bg-neutral-800/50 rounded-[36px] border border-neutral-100 dark:border-neutral-700/50 shadow-sm overflow-hidden">
+      <div class="flex flex-col sm:flex-row sm:items-center gap-3 justify-between p-8 pb-4">
+        <div>
+          <h3 class="text-xl font-black tracking-tight dark:text-neutral-100">Tenant Performance</h3>
+          <p class="text-neutral-400 text-sm font-medium">Search and sort every location by the metric that matters</p>
+        </div>
+        <label class="relative block sm:w-64">
+          <Search size={14} class="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
+          <input
+            type="search"
+            bind:value={tenantQuery}
+            placeholder="Search tenants…"
+            aria-label="Search tenants"
+            class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 pl-9 pr-3 py-2.5 rounded-2xl text-sm font-semibold outline-none focus:border-indigo-400 dark:text-neutral-100"
+          />
+        </label>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm min-w-[720px]">
+          <thead>
+            <tr class="text-[9px] font-black uppercase tracking-widest text-neutral-400 border-y border-neutral-100 dark:border-neutral-700/50">
+              <th class="px-8 py-3 font-black">Tenant</th>
+              {#each [
+                { key: 'todaySales', label: 'Today' },
+                { key: 'totalSales', label: 'All-time' },
+                { key: 'todayTxCount', label: 'Txns today' },
+                { key: 'stockValue', label: 'Stock value' },
+                { key: 'lowStockCount', label: 'Low stock' },
+                { key: 'activeShifts', label: 'Shifts' },
+              ] as col (col.key)}
+                <th class="px-4 py-3 font-black">
+                  <button
+                    onclick={() => toggleSort(col.key as typeof sortKey)}
+                    aria-label={`Sort by ${col.label}`}
+                    class="inline-flex items-center gap-1 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors uppercase tracking-widest text-[9px] font-black"
+                  >
+                    {col.label}
+                    <ArrowUpDown size={12} class={sortKey === col.key ? 'text-indigo-500' : 'opacity-40'} />
+                  </button>
+                </th>
+              {/each}
+            </tr>
+          </thead>
+          <tbody>
+            {#each visibleTenants as t (t.merchantId)}
+              <tr
+                class="border-b border-neutral-50 dark:border-neutral-700/30 last:border-0 hover:bg-neutral-50 dark:hover:bg-neutral-700/20 transition-colors cursor-pointer"
+              >
+                <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                <td class="px-8 py-3" onclick={() => selectedTenant = selectedTenant === t.merchantId ? null : t.merchantId}>
+                  <div class="flex items-center gap-3">
+                    <span class="w-2.5 h-2.5 rounded-full shrink-0" style={`background-color:${t.color}`}></span>
+                    <div class="min-w-0">
+                      <p class="font-black text-neutral-900 dark:text-neutral-100 text-xs">{t.type}</p>
+                      <p class="text-[10px] text-neutral-400 font-medium truncate max-w-[180px]">{t.name}</p>
+                    </div>
+                  </div>
+                </td>
+                <td class="px-4 py-3 font-black tabular-nums text-neutral-900 dark:text-neutral-100">{formatCurrency(t.todaySales || 0)}</td>
+                <td class="px-4 py-3 font-bold tabular-nums text-neutral-500">{formatCurrency(t.totalSales || 0)}</td>
+                <td class="px-4 py-3 font-bold tabular-nums text-neutral-500">{Number(t.todayTxCount || 0).toLocaleString()}</td>
+                <td class="px-4 py-3 font-bold tabular-nums text-neutral-500">{formatCurrency(t.stockValue || 0)}</td>
+                <td class="px-4 py-3">
+                  {#if t.lowStockCount > 0}
+                    <span class="px-2 py-0.5 rounded-lg text-[10px] font-black bg-amber-500/10 text-amber-600">{t.lowStockCount}</span>
+                  {:else}
+                    <span class="text-neutral-300 font-bold">—</span>
+                  {/if}
+                </td>
+                <td class="px-4 py-3">
+                  {#if t.activeShifts > 0}
+                    <span class="px-2 py-0.5 rounded-lg text-[10px] font-black bg-emerald-500/10 text-emerald-600">{t.activeShifts} open</span>
+                  {:else}
+                    <span class="text-neutral-300 font-bold">—</span>
+                  {/if}
+                </td>
+              </tr>
+            {:else}
+              <tr>
+                <td colspan="7" class="px-8 py-10 text-center text-[10px] font-black uppercase tracking-widest text-neutral-400">
+                  No tenants match “{tenantQuery}”
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Operations: payment mix + shift board (live data) -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <!-- Payment mix -->
+      <div class="bg-white dark:bg-neutral-800/50 p-8 rounded-[36px] border border-neutral-100 dark:border-neutral-700/50 shadow-sm">
+        <div class="flex items-center gap-4 mb-2">
+          <div class="w-12 h-12 bg-blue-50 dark:bg-blue-500/10 text-blue-600 rounded-[20px] flex items-center justify-center">
+            <CreditCard size={24} />
           </div>
           <div>
-            <h3 class="text-xl font-black dark:text-neutral-100">National Infrastructure Health</h3>
-            <p class="text-neutral-400 text-sm font-medium">Real-time latency & sync integrity across all clusters</p>
+            <h3 class="text-xl font-black dark:text-neutral-100">Payment Mix</h3>
+            <p class="text-neutral-400 text-sm font-medium">Today's card vs cash takings</p>
           </div>
         </div>
-        <div class="flex gap-3">
-          <div class="flex items-center gap-2 px-3 py-1.5 bg-neutral-50 dark:bg-neutral-700/50 rounded-xl border border-neutral-100 dark:border-neutral-600">
-            <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
-            <span class="text-[9px] font-black uppercase tracking-widest text-neutral-500">Global Sync: 100%</span>
+        <div class="flex items-center gap-3 mb-6">
+          <div class="flex-1 h-3 rounded-full overflow-hidden bg-neutral-100 dark:bg-neutral-700 flex" role="img" aria-label={`Card ${globalCardPct} percent, cash ${100 - globalCardPct} percent`}>
+            <div class="h-full bg-blue-500 transition-all duration-700" style={`width:${globalCardPct}%`}></div>
+            <div class="h-full bg-emerald-500 transition-all duration-700" style={`width:${100 - globalCardPct}%`}></div>
           </div>
+        </div>
+        <div class="flex items-center gap-4 mb-6 text-xs font-bold">
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-blue-500"></span>Card {globalCardPct}% · {formatCurrency(globalCardTotal)}</span>
+          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-emerald-500"></span>Cash {100 - globalCardPct}% · {formatCurrency(globalCashTotal)}</span>
+        </div>
+        <div class="space-y-3">
+          {#each paymentMix as t (t.merchantId)}
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-[10px] font-black text-neutral-500 uppercase tracking-widest">{t.type}</span>
+                <span class="text-[10px] font-bold text-neutral-400 tabular-nums">Card {t.cardPct}%</span>
+              </div>
+              <div class="h-2 rounded-full overflow-hidden bg-neutral-100 dark:bg-neutral-700 flex">
+                <div class="h-full rounded-full transition-all duration-700" style={`width:${t.cardPct}%;background-color:${t.color}`}></div>
+              </div>
+            </div>
+          {/each}
         </div>
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
-        {#each [
-          { label: 'SLA Compliance',    value: '99.98%',                              pct: 99,  colorHex: '#10b981', desc: 'System uptime within Tier 1 SLA parameters.' },
-          { label: 'Failover Activity', value: `${global_?.merchantCount ?? 4} Active Nodes`, pct: 15,  colorHex: '#f59e0b', desc: 'Teltonika 5G failovers operational. Sync integrity maintained.' },
-          { label: 'Security Audit',    value: 'Secure',                              pct: 100, colorHex: '#6366f1', desc: 'End-to-end encryption layers fully operational.' },
-          { label: 'Data Pipeline',     value: `${global_?.totalTransactions ?? 0} Events`,   pct: 78,  colorHex: '#f43f5e', desc: 'Cross-tenant event bus processing at nominal throughput.' },
-        ] as metric, i}
-          <div class="space-y-4">
-            <div class="flex justify-between items-center">
-              <span class="text-[9px] font-black text-neutral-400 uppercase tracking-widest">{metric.label}</span>
-              <span class="text-xs font-black" style={`color:${metric.colorHex}`}>{metric.value}</span>
+
+      <!-- Shift board -->
+      <div class="lg:col-span-2 bg-white dark:bg-neutral-800/50 p-8 rounded-[36px] border border-neutral-100 dark:border-neutral-700/50 shadow-sm">
+        <div class="flex items-center justify-between mb-6">
+          <div class="flex items-center gap-4">
+            <div class="w-12 h-12 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 rounded-[20px] flex items-center justify-center">
+              <Clock size={24} />
             </div>
-            <div class="h-2 bg-neutral-100 dark:bg-neutral-700 rounded-full overflow-hidden">
-              <div class="h-full rounded-full transition-all duration-1000" style={`width:${metric.pct}%;background-color:${metric.colorHex}`}></div>
+            <div>
+              <h3 class="text-xl font-black dark:text-neutral-100">Who's On Shift</h3>
+              <p class="text-neutral-400 text-sm font-medium">{shiftBoard.length} staff clocked in across {global_?.merchantCount ?? 0} locations</p>
             </div>
-            <p class="text-[9px] text-neutral-400 leading-relaxed">{metric.desc}</p>
           </div>
-        {/each}
+          <div class="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-500/10 rounded-xl border border-emerald-100 dark:border-emerald-500/20">
+            <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
+            <span class="text-[9px] font-black uppercase tracking-widest text-emerald-600">{global_?.activeShifts ?? 0} open shifts</span>
+          </div>
+        </div>
+        {#if shiftBoard.length > 0}
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
+            {#each shiftBoard as s (s.shiftId || s.name + s.merchantId)}
+              <div class="flex items-center gap-3 p-3 rounded-2xl border border-neutral-100 dark:border-neutral-700/50 hover:bg-neutral-50 dark:hover:bg-neutral-700/20 transition-all">
+                <div class="w-9 h-9 rounded-xl flex items-center justify-center text-xs font-black shrink-0" style={`background-color:${s.color}15;color:${s.color}`}>
+                  {s.name?.[0] || '?'}
+                </div>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-black text-neutral-900 dark:text-neutral-100 truncate">{s.name}</p>
+                  <p class="text-[9px] font-bold text-neutral-400">{s.merchantType}</p>
+                </div>
+                <span class="text-[10px] font-black tabular-nums px-2 py-1 rounded-lg shrink-0" style={`background-color:${s.color}10;color:${s.color}`}>
+                  {s.onShiftFor}
+                </span>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="py-10 text-center opacity-40">
+            <Users size={32} class="mx-auto mb-3 text-neutral-400" />
+            <p class="text-[10px] font-black uppercase tracking-widest text-neutral-400">No open shifts right now</p>
+          </div>
+        {/if}
       </div>
     </div>
 
@@ -1079,181 +1684,104 @@
 
   <!-- â”€â”€ MAP VIEW â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
   {#if activeView === 'map'}
-    <div class="bg-white dark:bg-neutral-800/50 rounded-[36px] border border-neutral-200 dark:border-neutral-700 overflow-hidden shadow-sm h-[700px] relative">
-      <div bind:this={mapEl} class="w-full h-full" style="height:100%;width:100%;border-radius:inherit"></div>
+    <div class="bg-white dark:bg-neutral-800/50 rounded-[36px] border border-neutral-200 dark:border-neutral-700 overflow-hidden shadow-sm h-[560px] sm:h-[640px] lg:h-[700px] relative">
+      <div bind:this={mapEl} class="w-full h-full" style="height:100%;width:100%;border-radius:inherit" role="application" aria-label="Merchant location map"></div>
 
-      <!-- Overlay info panel -->
-      <div class="absolute top-8 left-8 p-8 bg-white/95 dark:bg-neutral-900/95 backdrop-blur-md rounded-[32px] border border-white dark:border-neutral-700 shadow-2xl max-w-sm" style="z-index:1000">
-        <h3 class="text-xl font-black mb-1 tracking-tight dark:text-neutral-100">National Node Matrix</h3>
-        <p class="text-neutral-500 text-sm font-medium leading-relaxed mb-6">Live traffic routing through regional Teltonika-X gateways via OpenStreetMap.</p>
-        <div class="space-y-3">
-          <div class="flex items-center gap-3">
-            <div class="w-9 h-9 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 rounded-xl flex items-center justify-center">
-              <WifiIcon size={16} />
-            </div>
-            <div>
-              <p class="text-sm font-black text-neutral-900 dark:text-neutral-100">Primary Uplinks</p>
-              <p class="text-[9px] font-black text-neutral-400 uppercase">{global_?.merchantCount ?? 4} Nodes Active</p>
-            </div>
+      <!-- Overlay info panel (collapsible so the map stays usable on small screens) -->
+      <div class="absolute top-4 left-4 right-4 sm:right-auto sm:top-8 sm:left-8 sm:p-8 bg-white/95 dark:bg-neutral-900/95 backdrop-blur-md rounded-[32px] border border-white dark:border-neutral-700 shadow-2xl sm:max-w-sm flex flex-col max-h-[62%] sm:max-h-[calc(100%-4rem)]" style="z-index:1000">
+        <div class="flex items-start justify-between gap-3 p-5 sm:p-0">
+          <div class="min-w-0">
+            <h3 class="text-xl font-black mb-1 tracking-tight dark:text-neutral-100">National Merchant Map</h3>
+            <p class="text-neutral-500 text-sm font-medium leading-relaxed">Live merchant locations. Click a dot for merchant info.</p>
           </div>
-          <div class="flex items-center gap-3">
-            <div class="w-9 h-9 bg-amber-50 dark:bg-amber-500/10 text-amber-600 rounded-xl flex items-center justify-center">
-              <Database size={16} />
-            </div>
-            <div>
-              <p class="text-sm font-black text-neutral-900 dark:text-neutral-100">GPRS Failover</p>
-              <p class="text-[9px] font-black text-neutral-400 uppercase">0 Nodes Switched</p>
-            </div>
-          </div>
-
-          <!-- Node status list -->
-          <div class="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700 space-y-2">
-            {#each nodes as node (node.id)}
-              <button
-                onclick={() => selectedNode = selectedNode === node.id ? null : node.id}
-                class={`w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-all text-left ${
-                  selectedNode === node.id
-                    ? 'bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30'
-                    : 'hover:bg-neutral-50 dark:hover:bg-neutral-800 border border-transparent'
-                }`}
-              >
-                <div
-                  class="w-2.5 h-2.5 rounded-full shrink-0"
-                  style={`background-color:${node.status === 'Online' ? '#10b981' : '#f59e0b'};box-shadow:0 0 8px ${node.status === 'Online' ? 'rgba(16,185,129,0.5)' : 'rgba(245,158,11,0.5)'}`}></div>
-                <div class="flex-1 min-w-0">
-                  <p class="text-[10px] font-black text-neutral-900 dark:text-neutral-100 truncate">{node.name}</p>
-                  <p class="text-[8px] font-bold text-neutral-400">{node.status} &bull; {node.load}% load</p>
-                </div>
-                <div class="w-12 h-1.5 bg-neutral-100 dark:bg-neutral-700 rounded-full overflow-hidden shrink-0">
-                  <div
-                    class="h-full rounded-full"
-                    style={`width:${node.load}%;background-color:${node.load > 90 ? '#ef4444' : node.load > 70 ? '#f59e0b' : '#10b981'}`}
-                  ></div>
-                </div>
-              </button>
-            {/each}
-          </div>
+          <button
+            onclick={() => mapPanelOpen = !mapPanelOpen}
+            class="shrink-0 p-2 rounded-xl border border-neutral-200 dark:border-neutral-700 text-neutral-500 hover:text-neutral-900 dark:hover:text-white transition-all"
+            aria-expanded={mapPanelOpen}
+            aria-label={mapPanelOpen ? 'Collapse merchant list' : 'Expand merchant list'}
+            title={mapPanelOpen ? 'Collapse panel' : 'Expand panel'}
+          >
+            <ChevronRight size={16} class={`transition-transform ${mapPanelOpen ? '-rotate-90' : 'rotate-90'}`} />
+          </button>
         </div>
+        {#if mapPanelOpen}
+          {#if tenants.length === 0}
+            <div class="px-5 pb-5 sm:p-0 sm:pt-6 overflow-y-auto custom-scrollbar space-y-3">
+              <div role="status" class="rounded-2xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 p-4 text-xs font-semibold text-amber-800 dark:text-amber-300 space-y-3">
+                <p>No merchant data to plot. The map needs the dashboard feed — check your connection, then reload it.</p>
+                <button
+                  onclick={() => loadDashboard()}
+                  class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-black uppercase tracking-widest transition-all"
+                >
+                  <RefreshCw size={12} /> Reload data
+                </button>
+              </div>
+            </div>
+          {/if}
+          {#if tenants.length > 0}
+            <div class="px-5 pb-5 sm:p-0 sm:pt-6 overflow-y-auto custom-scrollbar space-y-3">
+              <div class="flex items-center gap-3">
+                <div class="w-9 h-9 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 rounded-xl flex items-center justify-center">
+                  <WifiIcon size={16} />
+                </div>
+                <div>
+                  <p class="text-sm font-black text-neutral-900 dark:text-neutral-100">Merchant Sites</p>
+                  <p class="text-[9px] font-black text-neutral-400 uppercase">{tenants.length} Merchants Active</p>
+                </div>
+              </div>
+              <div class="pt-3 border-t border-neutral-200 dark:border-neutral-700 space-y-2">
+                {#each tenants as t (t.merchantId)}
+                  <button
+                    onclick={() => { selectedNode = t.merchantId; markerById.get(t.merchantId)?.openPopup(); }}
+                    aria-pressed={selectedNode === t.merchantId}
+                    class={`w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-all text-left focus-visible:outline-2 focus-visible:outline-indigo-500 ${
+                      selectedNode === t.merchantId
+                        ? 'bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30'
+                        : 'hover:bg-neutral-50 dark:hover:bg-neutral-800 border border-transparent'
+                    }`}
+                  >
+                    <div
+                      class="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={`background-color:${t.color};box-shadow:0 0 8px ${t.color}80`}></div>
+                    <div class="flex-1 min-w-0">
+                      <p class="text-[10px] font-black text-neutral-900 dark:text-neutral-100 truncate">{t.name}</p>
+                      <p class="text-[8px] font-bold text-neutral-400">{t.type} &bull; R {Number(t.todaySales || 0).toLocaleString()} today</p>
+                    </div>
+                    <div class="w-12 h-1.5 bg-neutral-100 dark:bg-neutral-700 rounded-full overflow-hidden shrink-0" role="img" aria-label={t.activeShifts > 0 ? 'Open now' : 'No active shift'}>
+                      <div
+                        class="h-full rounded-full"
+                        style={`width:${Math.min(100, (t.activeShifts ?? 0) > 0 ? 100 : 0)}%;background-color:${t.color}`}
+                      ></div>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        {/if}
       </div>
 
       <!-- Bottom-right legend -->
-      <div class="absolute bottom-8 right-8 px-5 py-3 bg-white/90 dark:bg-neutral-900/90 backdrop-blur-md rounded-2xl border border-neutral-200 dark:border-neutral-700 shadow-lg" style="z-index:1000">
-        <div class="flex items-center gap-4">
-          <div class="flex items-center gap-1.5">
-            <div class="w-3 h-3 rounded-full bg-indigo-600" style="box-shadow:0 0 8px rgba(99,102,241,0.5)"></div>
-            <span class="text-[8px] font-black text-neutral-500 uppercase tracking-widest">Online</span>
-          </div>
-          <div class="flex items-center gap-1.5">
-            <div class="w-3 h-3 rounded-full bg-amber-500" style="box-shadow:0 0 8px rgba(245,158,11,0.5)"></div>
-            <span class="text-[8px] font-black text-neutral-500 uppercase tracking-widest">Warning</span>
-          </div>
-          <div class="flex items-center gap-1.5">
-            <div class="w-3 h-3 rounded-full bg-red-500" style="box-shadow:0 0 8px rgba(239,68,68,0.5)"></div>
-            <span class="text-[8px] font-black text-neutral-500 uppercase tracking-widest">Offline</span>
-          </div>
+      {#if tenants.length > 0}
+      <div class="absolute bottom-4 right-4 sm:bottom-8 sm:right-8 px-4 py-2.5 sm:px-5 sm:py-3 bg-white/90 dark:bg-neutral-900/90 backdrop-blur-md rounded-2xl border border-neutral-200 dark:border-neutral-700 shadow-lg max-w-[calc(100%-2rem)]" style="z-index:1000">
+        <div class="flex items-center gap-3 sm:gap-4 flex-wrap">
+          {#each tenants as t (t.merchantId)}
+            <div class="flex items-center gap-1.5">
+              <div class="w-3 h-3 rounded-full" style={`background-color:${t.color};box-shadow:0 0 8px ${t.color}80`}></div>
+              <span class="text-[8px] font-black text-neutral-500 uppercase tracking-widest">{t.type}</span>
+            </div>
+          {/each}
         </div>
       </div>
-    </div>
-  {/if}
-
-  <!-- â”€â”€ ROADMAP VIEW â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-  {#if activeView === 'roadmap'}
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-      {#each roadmap as item, i}
-        <div class="bg-white dark:bg-neutral-800 p-10 rounded-[36px] border border-neutral-200 dark:border-neutral-700 shadow-sm relative overflow-hidden group hover:border-indigo-600 transition-all">
-          <div class="relative z-10">
-            <div class="flex justify-between items-start mb-8">
-              <div>
-                <h4 class="text-xl font-black tracking-tight mb-1 dark:text-neutral-100">{item.phase}</h4>
-                <p class="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-500">{item.time}</p>
-              </div>
-              <span class={`px-3 py-1.5 rounded-2xl text-[8px] font-black uppercase tracking-widest ${item.status === 'Current' ? 'bg-indigo-600 text-white shadow-xl' : 'bg-neutral-100 dark:bg-neutral-700 text-neutral-400'}`}>
-                {item.status}
-              </span>
-            </div>
-            <div class="space-y-3">
-              {#each item.goals as goal}
-                <div class="flex items-center gap-3">
-                  <div class="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-                  <span class="text-sm font-bold text-neutral-700 dark:text-neutral-300">{goal}</span>
-                </div>
-              {/each}
-            </div>
-          </div>
-          <div class="absolute -bottom-8 -right-8 w-32 h-32 bg-indigo-50/50 dark:bg-indigo-500/5 rounded-full blur-3xl group-hover:bg-indigo-100 dark:group-hover:bg-indigo-500/10 transition-colors"></div>
-        </div>
-      {/each}
-    </div>
-  {/if}
-
-  <!-- â”€â”€ TARGET MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-  {#if showTargetModal}
-    <div class="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/80 backdrop-blur-md">
-      <div class="bg-white dark:bg-neutral-900 rounded-[32px] p-8 max-w-xl w-full shadow-2xl space-y-6">
-        <div class="flex items-center justify-between">
-          <h3 class="text-xl font-black tracking-tight dark:text-neutral-100">Set Sales Targets</h3>
-          <button onclick={() => showTargetModal = false} class="p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-full">
-            <X size={20} />
-          </button>
-        </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-1">
-            <label for="target-store" class="text-[9px] font-black text-neutral-400 uppercase tracking-widest ml-1">Tenant / Store</label>
-            <select
-              id="target-store"
-              bind:value={targetData.store}
-              class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 p-3 rounded-2xl font-bold outline-none text-sm"
-            >
-              <option value="">Select Tenant</option>
-              {#each tenants as t (t.merchantId)}
-                <option value={t.name}>{t.type} â€” {t.name}</option>
-              {/each}
-            </select>
-          </div>
-          <div class="space-y-1">
-            <label for="target-category" class="text-[9px] font-black text-neutral-400 uppercase tracking-widest ml-1">Category</label>
-            <select
-              id="target-category"
-              bind:value={targetData.category}
-              class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 p-3 rounded-2xl font-bold outline-none text-sm"
-            >
-              <option value="General">General Sales</option>
-              <option value="Fuel">Fuel (Litres)</option>
-              <option value="Workshop">Service Hours</option>
-              <option value="Food">Food Revenue</option>
-            </select>
-          </div>
-          <div class="col-span-2 space-y-1">
-            <label for="target-monthly" class="text-[9px] font-black text-neutral-400 uppercase tracking-widest ml-1">Monthly Target (ZAR)</label>
-            <input
-              id="target-monthly"
-              type="number"
-              placeholder="R 0.00"
-              bind:value={targetData.monthlyTarget}
-              class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 p-4 rounded-2xl font-black text-2xl outline-none focus:ring-4 focus:ring-indigo-100 dark:focus:ring-indigo-900 transition-all"
-            />
-          </div>
-        </div>
-        <div class="p-4 bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-100 dark:border-indigo-500/20 rounded-2xl flex items-center gap-3">
-          <CheckCircle2 size={24} class="text-indigo-600 shrink-0" />
-          <p class="text-[10px] font-medium text-indigo-900 dark:text-indigo-300 leading-relaxed">
-            Targets are pushed in real-time to the branch manager's dashboard.
-          </p>
-        </div>
-        <button
-          onclick={handleSetTarget}
-          class="w-full py-4 bg-neutral-900 dark:bg-indigo-600 text-white rounded-[20px] font-black uppercase tracking-widest shadow-xl hover:bg-neutral-800 dark:hover:bg-indigo-700 transition-all text-sm"
-        >
-          Push Targets to Hub
-        </button>
-      </div>
+      {/if}
     </div>
   {/if}
 
   <!-- â”€â”€ EXPORT MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
   {#if showExportModal}
-    <div class="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/80 backdrop-blur-md">
-      <div class="bg-white dark:bg-neutral-900 rounded-[32px] p-8 max-w-lg w-full shadow-2xl space-y-6">
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/80 backdrop-blur-md" onclick={(e) => { if (e.target === e.currentTarget) showExportModal = false; }}>
+      <div role="dialog" aria-modal="true" aria-label="Export report" class="bg-white dark:bg-neutral-900 rounded-[32px] p-8 max-w-lg w-full shadow-2xl space-y-6">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 rounded-2xl flex items-center justify-center">
@@ -1346,7 +1874,7 @@
 
         <button
           onclick={handleExport}
-          disabled={exporting}
+          disabled={exporting || exportJobRunning}
           class="w-full py-4 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white rounded-[20px] font-black uppercase tracking-widest shadow-xl transition-all text-sm flex items-center justify-center gap-2"
         >
           {#if exporting}
@@ -1355,14 +1883,27 @@
             <Download size={16} /> Export {exportFormat.toUpperCase()}
           {/if}
         </button>
+        <button
+          onclick={handleQueuedExport}
+          disabled={exporting || exportJobRunning}
+          title="Large ranges run in the background via the job queue (RabbitMQ when configured) and download when ready"
+          class="w-full py-3 border border-neutral-200 dark:border-neutral-700 rounded-[20px] font-black uppercase tracking-widest text-[11px] text-neutral-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
+        >
+          {#if exportJobRunning}
+            <Loader2 size={14} class="animate-spin" /> Queued — preparing file…
+          {:else}
+            <Clock size={14} /> Queue in background
+          {/if}
+        </button>
       </div>
     </div>
   {/if}
 
   <!-- â”€â”€ DEVICE REGISTRY MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
   {#if showDevices}
-    <div class="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div class="bg-white dark:bg-neutral-900 rounded-[40px] p-8 shadow-2xl border border-neutral-200 dark:border-neutral-700 w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onclick={(e) => { if (e.target === e.currentTarget) showDevices = false; }}>
+      <div role="dialog" aria-modal="true" aria-label="Device registry" class="bg-white dark:bg-neutral-900 rounded-[40px] p-8 shadow-2xl border border-neutral-200 dark:border-neutral-700 w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
         <div class="flex items-center justify-between mb-6">
           <div>
             <h3 class="text-2xl font-black tracking-tight dark:text-neutral-100">Device Registry</h3>
@@ -1509,8 +2050,40 @@
   .dashboard-shell :global(.rounded-\[28px\]) { border-radius: 1.4rem; }
   .dashboard-shell :global(.shadow-\[0_8px_30px_rgba\(0\,0\,0\,0\.02\)\]) { box-shadow: 0 14px 36px rgba(15, 23, 42, .06); }
   .dashboard-shell :global(button) { min-height: 2.75rem; }
+  .dashboard-shell :global(button:focus-visible),
+  .dashboard-shell :global(a:focus-visible),
+  .dashboard-shell :global(input:focus-visible),
+  .dashboard-shell :global(select:focus-visible) {
+    outline: 2px solid #6366f1;
+    outline-offset: 2px;
+  }
+  .scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+  .custom-scrollbar { scrollbar-width: thin; scrollbar-color: rgba(148, 163, 184, .5) transparent; }
+  .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, .5); border-radius: 999px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .skeleton-shimmer {
+    background: linear-gradient(90deg, rgba(148, 163, 184, .18) 25%, rgba(148, 163, 184, .32) 50%, rgba(148, 163, 184, .18) 75%);
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  }
+  @keyframes skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  .refreshing-slide { animation: refreshing-slide 1.1s ease-in-out infinite; }
+  @keyframes refreshing-slide {
+    0% { margin-left: -33%; }
+    100% { margin-left: 100%; }
+  }
   @media (max-width: 640px) {
     .dashboard-shell :global(.p-8) { padding: 1.25rem; }
     .dashboard-shell :global(.text-3xl), .dashboard-shell :global(.text-4xl) { font-size: 1.65rem; line-height: 1.1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton-shimmer { animation: none; }
+    .dashboard-shell :global(.animate-pulse),
+    .dashboard-shell :global(.animate-spin) { animation-duration: 2s; }
   }
 </style>

@@ -23,14 +23,9 @@
     if (!data.account.lastName.trim()) e['account.lastName'] = 'Last name is required';
     if (!data.account.email.trim()) e['account.email'] = 'Email is required';
     else if (!EMAIL_RE.test(data.account.email)) e['account.email'] = 'Enter a valid email address';
+    else if (!emailVerified || verifiedEmail !== data.account.email.trim().toLowerCase()) e['account.email'] = 'Verify your email address before continuing';
     if (!data.account.mobile.trim()) e['account.mobile'] = 'Mobile number is required';
     else if (!PHONE_RE.test(data.account.mobile.replace(/[\s-]/g, ''))) e['account.mobile'] = 'Enter a valid SA mobile (e.g. 082 123 4567)';
-    if (!data.account.password) e['account.password'] = 'Password is required';
-    else if (data.account.password.length < 8) e['account.password'] = 'Minimum 8 characters';
-    else if (!/[A-Z]/.test(data.account.password)) e['account.password'] = 'Must include an uppercase letter';
-    else if (!/\d/.test(data.account.password)) e['account.password'] = 'Must include a number';
-    if (!data.account.confirmPassword) e['account.confirmPassword'] = 'Please confirm your password';
-    else if (data.account.password !== data.account.confirmPassword) e['account.confirmPassword'] = 'Passwords do not match';
     return e;
   }
 
@@ -56,7 +51,7 @@
     const e: FieldErrors = {};
     const reqDocs = ['cipc', 'id'];
     for (const docId of reqDocs) {
-      if (!data.documents.find((d: any) => d.type === docId)) {
+      if (!data.documents.find((d: any) => d.type === docId && d.path)) {
         e[`doc.${docId}`] = docId === 'cipc' ? 'Company registration is required' : 'Director ID is required';
       }
     }
@@ -84,11 +79,21 @@
 
   let step = $state(1);
   let uploading = $state<string | null>(null);
+  let submitting = $state(false);
   let applicationId = $state<string | null>(null);
+  let adminEmailSent = $state<boolean | null>(null);
+  let welcomeEmailSent = $state<boolean | null>(null);
+  let emailVerified = $state(false);
+  let verifiedEmail = $state('');
+  let emailVerificationToken = $state('');
+  let otpSent = $state(false);
+  let otpCode = $state('');
+  let sendingOtp = $state(false);
+  let verifyingOtp = $state(false);
   let errors = $state<FieldErrors>({});
   let touched = $state<Set<string>>(new Set());
   let formData = $state<any>({
-    account: { firstName: '', lastName: '', email: '', mobile: '', password: '', confirmPassword: '' },
+    account: { firstName: '', lastName: '', email: '', mobile: '' },
     businessInfo: { legalName: '', dba: '', type: 'Retail', subtype: '', structure: 'Company', address: '', city: '', province: '', postalCode: '', phone: '', website: '', monthlySales: '0-50k', lat: null, lng: null },
     banking: { bankName: '', accountNumber: '', routingNumber: '', holderName: '', accountType: 'Checking' },
     documents: [] as any[],
@@ -131,6 +136,55 @@
     step = Math.min(step + 1, 9);
   }
 
+  function updateEmail(value: string) {
+    if (value.trim().toLowerCase() !== verifiedEmail) {
+      emailVerified = false;
+      verifiedEmail = '';
+      emailVerificationToken = '';
+      otpSent = false;
+      otpCode = '';
+    }
+    formData = { ...formData, account: { ...formData.account, email: value } };
+  }
+
+  async function sendEmailCode() {
+    const email = formData.account.email.trim().toLowerCase();
+    if (!EMAIL_RE.test(email)) {
+      errors = { ...errors, 'account.email': 'Enter a valid email address' };
+      return;
+    }
+    sendingOtp = true;
+    try {
+      const result = await api.sendOnboardingEmailOtp(email);
+      if (!result.success) throw new Error(result.error || 'Could not send verification code');
+      otpSent = true;
+      otpCode = '';
+      toast.success('Verification code sent to your email');
+    } catch (error: any) {
+      toast.error(error.message || 'Could not send verification code');
+    } finally { sendingOtp = false; }
+  }
+
+  async function verifyEmailCode() {
+    const email = formData.account.email.trim().toLowerCase();
+    if (!/^\d{6}$/.test(otpCode)) {
+      toast.error('Enter the six-digit code from your email');
+      return;
+    }
+    verifyingOtp = true;
+    try {
+      const result = await api.verifyOnboardingEmailOtp(email, otpCode);
+      if (!result.success || !result.verificationToken) throw new Error(result.error || 'Email verification failed');
+      emailVerified = true;
+      verifiedEmail = email;
+      emailVerificationToken = result.verificationToken;
+      otpSent = false;
+      toast.success('Email verified');
+    } catch (error: any) {
+      toast.error(error.message || 'Email verification failed');
+    } finally { verifyingOtp = false; }
+  }
+
   function prevStep() {
     errors = {};
     step = Math.max(step - 1, 1);
@@ -147,7 +201,7 @@
       uploading = docType;
       try {
         const res = await api.uploadFile(file);
-        if (res.success) {
+        if (res.success && res.path) {
           const newDoc = {
             name: res.name,
             path: res.path,
@@ -164,17 +218,25 @@
           errors = next;
           toast.success('Document uploaded');
         } else {
-          toast.error('Upload failed');
+          toast.error(res.error || 'Upload failed');
         }
       } catch {
         toast.error('Upload error');
       } finally {
         uploading = null;
+        input.value = '';
       }
     }
   }
 
   async function handleSubmit() {
+    if (submitting || uploading) return;
+    const documentErrors = validateStep4(formData);
+    if (Object.keys(documentErrors).length > 0) {
+      errors = documentErrors;
+      toast.error('Upload the required documents before submitting');
+      return;
+    }
     const stepErrors = validateStep8(formData);
     if (Object.keys(stepErrors).length > 0) {
       const next = new Set(touched);
@@ -184,16 +246,29 @@
       toast.error('Please accept the required agreements');
       return;
     }
+    submitting = true;
     try {
-      const data = await api.submitOnboarding(formData);
+      if (!emailVerified || verifiedEmail !== formData.account.email.trim().toLowerCase()) {
+        step = 1;
+        toast.error('Verify your email address before submitting');
+        return;
+      }
+      const data = await api.submitOnboarding({ ...formData, emailVerificationToken });
       if (data.success) {
         applicationId = data.applicationId;
+        adminEmailSent = data.emailSent === true;
+        welcomeEmailSent = data.welcomeEmailSent === true;
         step = 9;
+        if (data.emailSent !== true) {
+          toast.error('Application saved, but the admin email could not be sent');
+        }
       } else {
         toast.error(data.error || 'Submission failed');
       }
     } catch {
       toast.error('Submission failed. Please check your connection.');
+    } finally {
+      submitting = false;
     }
   }
 
@@ -272,66 +347,47 @@
             </div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div class="space-y-2">
-                <label class="text-[10px] font-black uppercase tracking-widest text-white">First Name <span class="text-red-400">*</span></label>
-                <input class={fieldClass('account.firstName')} value={formData.account.firstName} oninput={e => formData = {...formData, account: {...formData.account, firstName: e.target.value}}} onblur={() => markTouched('account.firstName')} placeholder="John" />
+                <label for="onboarding-first-name" class="text-[10px] font-black uppercase tracking-widest text-white">First Name <span class="text-red-400">*</span></label>
+                <input id="onboarding-first-name" class={fieldClass('account.firstName')} value={formData.account.firstName} oninput={e => formData = {...formData, account: {...formData.account, firstName: e.target.value}}} onblur={() => markTouched('account.firstName')} placeholder="John" />
                 {#if errors['account.firstName']}
                   <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['account.firstName']}</p>
                 {/if}
               </div>
               <div class="space-y-2">
-                <label class="text-[10px] font-black uppercase tracking-widest text-white">Last Name <span class="text-red-400">*</span></label>
-                <input class={fieldClass('account.lastName')} value={formData.account.lastName} oninput={e => formData = {...formData, account: {...formData.account, lastName: e.target.value}}} onblur={() => markTouched('account.lastName')} placeholder="Smith" />
+                <label for="onboarding-last-name" class="text-[10px] font-black uppercase tracking-widest text-white">Last Name <span class="text-red-400">*</span></label>
+                <input id="onboarding-last-name" class={fieldClass('account.lastName')} value={formData.account.lastName} oninput={e => formData = {...formData, account: {...formData.account, lastName: e.target.value}}} onblur={() => markTouched('account.lastName')} placeholder="Smith" />
                 {#if errors['account.lastName']}
                   <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['account.lastName']}</p>
                 {/if}
               </div>
               <div class="col-span-2 space-y-2">
-                <label class="text-[10px] font-black uppercase tracking-widest text-white">Email (System Login) <span class="text-red-400">*</span></label>
-                <input type="email" class={fieldClass('account.email')} value={formData.account.email} oninput={e => formData = {...formData, account: {...formData.account, email: e.target.value}}} onblur={() => markTouched('account.email')} placeholder="john@company.co.za" />
+                <label for="onboarding-email" class="text-[10px] font-black uppercase tracking-widest text-white">Email address <span class="text-red-400">*</span></label>
+                <div class="flex flex-col sm:flex-row gap-2">
+                  <input id="onboarding-email" type="email" class={fieldClass('account.email')} value={formData.account.email} oninput={e => updateEmail(e.target.value)} onblur={() => markTouched('account.email')} placeholder="john@company.co.za" autocomplete="email" />
+                  <button type="button" onclick={sendEmailCode} disabled={sendingOtp || emailVerified} class="shrink-0 px-5 py-3 rounded-2xl bg-indigo-600 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-50">
+                    {#if sendingOtp}<Loader2 class="inline w-4 h-4 animate-spin" />{:else if emailVerified}<CheckCircle2 class="inline w-4 h-4" />{:else}Verify email{/if}
+                  </button>
+                </div>
                 {#if errors['account.email']}
                   <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['account.email']}</p>
                 {/if}
-              </div>
-              <div class="col-span-2 space-y-2">
-                <label class="text-[10px] font-black uppercase tracking-widest text-white">Mobile Number <span class="text-red-400">*</span></label>
-                <input type="tel" class={fieldClass('account.mobile')} value={formData.account.mobile} oninput={e => formData = {...formData, account: {...formData.account, mobile: e.target.value}}} onblur={() => markTouched('account.mobile')} placeholder="082 123 4567" />
-                {#if errors['account.mobile']}
-                  <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['account.mobile']}</p>
-                {/if}
-              </div>
-              <div class="space-y-2">
-                <label class="text-[10px] font-black uppercase tracking-widest text-white">Create Password <span class="text-red-400">*</span></label>
-                <input type="password" class={fieldClass('account.password')} value={formData.account.password} oninput={e => formData = {...formData, account: {...formData.account, password: e.target.value}}} onblur={() => markTouched('account.password')} placeholder="Min. 8 characters" />
-                {#if errors['account.password']}
-                  <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['account.password']}</p>
-                {/if}
-                {#if formData.account.password}
-                  {@const checks = [
-                    { label: '8+ characters', ok: formData.account.password.length >= 8 },
-                    { label: 'Uppercase letter', ok: /[A-Z]/.test(formData.account.password) },
-                    { label: 'Number', ok: /\d/.test(formData.account.password) },
-                    { label: 'Special character', ok: /[!@#$%^&*(),.?":{}|<>]/.test(formData.account.password) },
-                  ]}
-                  {@const score = checks.filter(c => c.ok).length}
-                  <div class="mt-3 space-y-2">
-                    <div class="flex gap-1.5">
-                      {#each [1,2,3,4] as i}
-                        <div class="h-1 flex-1 rounded-full transition-all duration-300 {i <= score ? score <= 1 ? 'bg-red-400' : score <= 2 ? 'bg-amber-400' : score <= 3 ? 'bg-emerald-400' : 'bg-indigo-500' : 'bg-neutral-200 dark:bg-neutral-700'}"></div>
-                      {/each}
-                    </div>
-                    <div class="flex flex-wrap gap-x-4 gap-y-1">
-                      {#each checks as c}
-                        <span class="text-[9px] font-bold {c.ok ? 'text-emerald-500' : 'text-neutral-300'}">{c.ok ? '\u2713' : '\u2022'} {c.label}</span>
-                      {/each}
-                    </div>
+                {#if emailVerified}
+                  <p class="text-xs font-bold text-emerald-400">Email verified</p>
+                {:else if otpSent}
+                  <div class="flex flex-col sm:flex-row gap-2 pt-2">
+                    <label class="sr-only" for="onboarding-email-otp">Six-digit verification code</label>
+                    <input id="onboarding-email-otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" class={fieldClass('account.otp')} bind:value={otpCode} placeholder="Enter 6-digit code" />
+                    <button type="button" onclick={verifyEmailCode} disabled={verifyingOtp} class="shrink-0 px-5 py-3 rounded-2xl bg-emerald-600 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-50">
+                      {#if verifyingOtp}<Loader2 class="inline w-4 h-4 animate-spin" />{:else}Confirm code{/if}
+                    </button>
                   </div>
                 {/if}
               </div>
-              <div class="space-y-2">
-                <label class="text-[10px] font-black uppercase tracking-widest text-white">Confirm Password <span class="text-red-400">*</span></label>
-                <input type="password" class={fieldClass('account.confirmPassword')} value={formData.account.confirmPassword} oninput={e => formData = {...formData, account: {...formData.account, confirmPassword: e.target.value}}} onblur={() => markTouched('account.confirmPassword')} placeholder="Re-enter password" />
-                {#if errors['account.confirmPassword']}
-                  <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['account.confirmPassword']}</p>
+              <div class="col-span-2 space-y-2">
+                <label for="onboarding-mobile" class="text-[10px] font-black uppercase tracking-widest text-white">Mobile Number <span class="text-red-400">*</span></label>
+                <input id="onboarding-mobile" type="tel" class={fieldClass('account.mobile')} value={formData.account.mobile} oninput={e => formData = {...formData, account: {...formData.account, mobile: e.target.value}}} onblur={() => markTouched('account.mobile')} placeholder="082 123 4567" />
+                {#if errors['account.mobile']}
+                  <p class="mt-1.5 flex items-center gap-1.5 text-[10px] font-bold text-red-500"><AlertCircle class="w-3 h-3 shrink-0" /> {errors['account.mobile']}</p>
                 {/if}
               </div>
             </div>
@@ -445,7 +501,7 @@
                 {@const docErr = errors[`doc.${doc.id}`]}
                 <div class="col-span-1">
                   <label class="block p-6 rounded-[24px] border-2 border-dashed transition-all cursor-pointer group relative {docErr ? 'border-red-300 bg-red-50/20 hover:border-red-400' : uploaded ? 'border-emerald-300 bg-emerald-50/30 dark:bg-emerald-900/10' : 'border-neutral-200 hover:border-indigo-400 hover:bg-indigo-50/30'}">
-                    <input type="file" class="hidden" onchange={(e) => handleFileUpload(e, doc.id)} accept=".pdf,.jpg,.png,.jpeg" />
+                    <input type="file" class="hidden" onchange={(e) => handleFileUpload(e, doc.id)} accept=".pdf,.jpg,.png,.jpeg" disabled={!!uploading || submitting} />
                     <div class="flex items-start gap-4">
                       <div class="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 {uploaded ? 'bg-emerald-100 text-emerald-600' : docErr ? 'bg-red-100 text-red-500' : 'bg-neutral-100 text-neutral-400 group-hover:bg-white group-hover:text-indigo-500'}">
                         {#if uploading === doc.id}
@@ -682,8 +738,14 @@
             </div>
             <div>
               <h2 class="text-3xl font-black tracking-tight dark:text-neutral-100">Application Submitted</h2>
-              <p class="text-neutral-500 font-medium max-w-sm mx-auto mt-2">Our compliance team is reviewing your profile. You will receive an email verification and OTP shortly.</p>
+              <p class="text-neutral-500 font-medium max-w-sm mx-auto mt-2">Our compliance team is reviewing your profile.</p>
             </div>
+            {#if adminEmailSent === false}
+              <p class="max-w-sm rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">Your application was saved, but the admin notification email could not be delivered. Please contact support.</p>
+            {/if}
+            {#if welcomeEmailSent === false}
+              <p class="max-w-sm rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">Your application was saved, but we could not deliver the confirmation email. We will send account setup instructions after approval.</p>
+            {/if}
             <div class="space-y-3 w-full max-w-sm">
               <div class="p-5 bg-neutral-50 dark:bg-neutral-800 rounded-[24px] border border-neutral-100 dark:border-neutral-700">
                 <p class="text-[10px] font-black uppercase tracking-widest text-neutral-400 mb-1">Application ID</p>
@@ -712,9 +774,9 @@
               <div class="h-1.5 rounded-full transition-all duration-300 {s.id === step ? 'w-6 bg-indigo-500' : s.id < step ? 'w-1.5 bg-emerald-400' : 'w-1.5 bg-neutral-200 dark:bg-neutral-700'}"></div>
             {/each}
           </div>
-          <button onclick={step === 8 ? handleSubmit : tryNextStep} class="flex items-center gap-2 px-10 py-4 bg-indigo-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl hover:bg-indigo-500 hover:scale-105 active:scale-95 transition-all">
-            {step === 8 ? 'Submit Application' : 'Next Sequence'}
-            <ArrowRight class="w-4 h-4" />
+          <button onclick={step === 8 ? handleSubmit : tryNextStep} disabled={step === 8 && (submitting || !!uploading)} class="flex items-center gap-2 px-10 py-4 bg-indigo-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl hover:bg-indigo-500 hover:scale-105 active:scale-95 transition-all disabled:cursor-not-allowed disabled:opacity-60">
+            {step === 8 && submitting ? 'Submitting…' : step === 8 ? 'Submit Application' : 'Next Sequence'}
+            {#if step === 8 && submitting}<Loader2 class="w-4 h-4 animate-spin" />{:else}<ArrowRight class="w-4 h-4" />{/if}
           </button>
         </div>
       {/if}

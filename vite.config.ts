@@ -3,6 +3,8 @@ import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 function figmaAssetResolver() {
   return {
     name: 'figma-asset-resolver',
@@ -16,11 +18,7 @@ function figmaAssetResolver() {
 }
 
 export default defineConfig({
-  plugins: [
-    figmaAssetResolver(),
-    svelte(),
-    tailwindcss(),
-  ],
+  plugins: [figmaAssetResolver(), svelte(), tailwindcss(), cloudflare()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

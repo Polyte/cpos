@@ -148,6 +148,19 @@
     return base;
   });
   let filteredNav = $derived(navigation.filter(nav => currentProfileConfig.tabs.includes(nav.id)));
+  let sidebarNavGroups = $derived.by(() => {
+    if (role !== 'Admin') return [{ label: 'Workspace tools', items: filteredNav }];
+    const sections = [
+      { label: 'Overview', ids: ['dashboard'] },
+      { label: 'Insights', ids: ['reports', 'forensic'] },
+      { label: 'Commerce', ids: ['merchants', 'customers', 'product-cloud'] },
+      { label: 'Administration', ids: ['users', 'support', 'settings'] },
+    ];
+    return sections
+      .map(section => ({ label: section.label, items: section.ids.map(id => filteredNav.find(item => item.id === id)).filter(item => item !== undefined) }))
+      .filter(section => section.items.length > 0);
+  });
+  let activeNavItem = $derived(filteredNav.find(item => item.id === activeTab));
   let currentTheme = $derived(roleThemes[role as keyof typeof roleThemes] || roleThemes['Cashier']);
 
   // â”€â”€â”€ Effects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -431,7 +444,7 @@
 
 <!-- â”€â”€â”€ Authenticated: full desktop shell â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
 {:else}
-  <div class="h-screen flex flex-col overflow-hidden bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 transition-colors duration-300">
+  <div class="dashboard-shell h-screen flex flex-col overflow-hidden bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 transition-colors duration-300">
 
     {#if terminalLocked}
       <TerminalLock
@@ -443,7 +456,7 @@
     {/if}
 
     <!-- â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-    <header class="flex-none flex items-center justify-between px-4 py-2 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-sm z-20">
+    <header class="dashboard-header flex-none flex items-center justify-between px-4 py-2 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-sm z-20">
 
       <!-- Left: logo + role badge -->
       <div class="flex items-center gap-3">
@@ -464,7 +477,7 @@
 
         <!-- Logo -->
         <div class="flex items-center gap-2">
-          <div class="w-7 h-7 rounded-lg bg-[var(--clint-primary)] flex items-center justify-center">
+          <div class="dashboard-brandmark w-8 h-8 rounded-xl bg-[var(--clint-primary)] flex items-center justify-center">
             <ShoppingCart class="w-4 h-4 text-white" />
           </div>
           <span class="font-semibold text-sm text-neutral-900 dark:text-neutral-100 hidden sm:block">Clinton POS</span>
@@ -475,10 +488,16 @@
           <div class="w-1.5 h-1.5 rounded-full bg-[var(--clint-primary)]"></div>
           {currentProfileConfig.name}
         </div>
+        {#if role === 'Admin' && activeNavItem}
+          <div class="hidden xl:flex items-center gap-2 pl-3 border-l border-neutral-200 dark:border-neutral-700 text-xs font-semibold text-neutral-500 dark:text-neutral-400">
+            <span class="text-neutral-300 dark:text-neutral-600">/</span>
+            <span>{activeNavItem.name}</span>
+          </div>
+        {/if}
       </div>
 
       <!-- Center: clock -->
-      <div class="flex flex-col items-center">
+      <div class="dashboard-clock hidden sm:flex flex-col items-center">
         <span class="font-mono text-sm font-semibold text-neutral-800 dark:text-neutral-200 tabular-nums">
           {formatTime(currentTime)}
         </span>
@@ -490,7 +509,7 @@
         <!-- Dark mode toggle -->
         <button
           onclick={() => darkMode = !darkMode}
-          class="p-1.5 rounded-md text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+          class="dashboard-action p-2 rounded-xl text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
           aria-label="Toggle dark mode"
         >
           {#if darkMode}
@@ -503,7 +522,7 @@
         <!-- Lock terminal -->
         <button
           onclick={() => terminalLocked = true}
-          class="p-1.5 rounded-md text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+          class="dashboard-action p-2 rounded-xl text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
           aria-label="Lock terminal"
           title="Lock terminal (Ctrl+L)"
         >
@@ -514,7 +533,7 @@
         <div class="relative" bind:this={notifEl}>
           <button
             onclick={() => showNotifications = !showNotifications}
-            class="relative p-1.5 rounded-md text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+            class="dashboard-action relative p-2 rounded-xl text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
             aria-label="Notifications"
           >
             <Bell class="w-4 h-4" />
@@ -572,7 +591,10 @@
         </div>
 
         <!-- User menu / logout -->
-        <div class="flex items-center gap-2 pl-1.5 border-l border-neutral-200 dark:border-neutral-700 ml-1">
+        <div class="dashboard-user flex items-center gap-2 pl-2 border-l border-neutral-200 dark:border-neutral-700 ml-1">
+          <div class="dashboard-avatar hidden sm:flex items-center justify-center rounded-xl bg-[var(--clint-primary)] text-white text-xs font-bold">
+            {(userProfile?.name || 'U').slice(0, 1).toUpperCase()}
+          </div>
           <div class="hidden sm:flex flex-col items-end">
             <span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 leading-none">
               {userProfile?.name || 'User'}
@@ -581,7 +603,7 @@
           </div>
           <button
             onclick={handleLogout}
-            class="p-1.5 rounded-md text-neutral-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+            class="dashboard-action p-2 rounded-xl text-neutral-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
             aria-label="Log out"
             title="Log out"
           >
@@ -604,34 +626,50 @@
 
       <!-- Sidebar navigation (desktop) -->
       {#if !isMobile && role !== 'Cashier'}
-        <nav class="w-60 flex-none flex flex-col border-r border-neutral-200/80 dark:border-neutral-800/80 bg-neutral-50/60 dark:bg-neutral-950/40 backdrop-blur-xl overflow-y-auto px-3 py-4 z-10">
+        <nav class="dashboard-sidebar w-60 flex-none flex flex-col border-r border-neutral-200/80 dark:border-neutral-800/80 bg-neutral-50/60 dark:bg-neutral-950/40 backdrop-blur-xl overflow-y-auto px-3 py-4 z-10">
           <!-- Section label -->
-          <p class="px-3 mb-2 text-[10px] font-bold uppercase tracking-[0.18em] text-neutral-400 dark:text-neutral-600">Menu</p>
-
-          <div class="flex flex-col gap-1">
-            {#each filteredNav as item (item.id)}
-              {@const ItemIcon = item.icon}
-              {@const active = activeTab === item.id}
-              <button
-                onclick={() => { activeTab = item.id; }}
-                class="group relative flex items-center gap-3 pl-3.5 pr-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200
-                  {active
-                    ? 'bg-[var(--clint-primary)] text-white shadow-lg shadow-[var(--clint-primary)]/25'
-                    : 'text-neutral-600 dark:text-neutral-400 hover:bg-white dark:hover:bg-neutral-800/70 hover:text-neutral-900 dark:hover:text-neutral-100 hover:shadow-sm'}"
-              >
-                <!-- Active accent bar -->
-                <span class="absolute left-0 top-1/2 -translate-y-1/2 w-1 rounded-r-full bg-white transition-all duration-200 {active ? 'h-5 opacity-90' : 'h-0 opacity-0'}"></span>
-                <span class="flex items-center justify-center w-7 h-7 rounded-lg transition-colors {active ? 'bg-white/20' : 'bg-neutral-200/60 dark:bg-neutral-800 group-hover:bg-neutral-200 dark:group-hover:bg-neutral-700'}">
-                  <ItemIcon class="w-4 h-4 flex-none" />
-                </span>
-                <span class="truncate">{item.name}</span>
-              </button>
+          <div class="dashboard-workspace mb-6 px-3 py-3.5 rounded-2xl">
+            <p class="mb-2 text-[9px] font-bold uppercase tracking-[0.2em] text-neutral-400 dark:text-neutral-500">Workspace</p>
+            <div class="flex items-center gap-2.5">
+              <div class="dashboard-workspace-icon flex items-center justify-center rounded-xl"><Store class="w-4 h-4" /></div>
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-neutral-800 dark:text-neutral-100">{userProfile?.merchantName || 'Clinton POS'}</p>
+                <p class="truncate text-[10px] text-neutral-500 dark:text-neutral-400">{currentProfileConfig.name}</p>
+              </div>
+            </div>
+          </div>
+          <div class="flex flex-col gap-5">
+            {#each sidebarNavGroups as group (group.label)}
+              <section aria-label={group.label}>
+                <p class="dashboard-section-label px-3 mb-2 text-[10px] font-bold uppercase tracking-[0.18em] text-neutral-400 dark:text-neutral-600">{group.label}</p>
+                <div class="flex flex-col gap-1">
+                  {#each group.items as item (item.id)}
+                    {@const ItemIcon = item.icon}
+                    {@const active = activeTab === item.id}
+                    <button
+                      onclick={() => { activeTab = item.id; }}
+                      data-active={active}
+                      aria-current={active ? 'page' : undefined}
+                      class="dashboard-nav-item group relative flex items-center gap-3 pl-3.5 pr-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200
+                        {active
+                          ? 'bg-[var(--clint-primary)] text-white shadow-lg shadow-[var(--clint-primary)]/25'
+                          : 'text-neutral-600 dark:text-neutral-400 hover:bg-white dark:hover:bg-neutral-800/70 hover:text-neutral-900 dark:hover:text-neutral-100 hover:shadow-sm'}"
+                    >
+                      <span class="absolute left-0 top-1/2 -translate-y-1/2 w-1 rounded-r-full bg-white transition-all duration-200 {active ? 'h-5 opacity-90' : 'h-0 opacity-0'}"></span>
+                      <span class="flex items-center justify-center w-7 h-7 rounded-lg transition-colors {active ? 'bg-white/20' : 'bg-neutral-200/60 dark:bg-neutral-800 group-hover:bg-neutral-200 dark:group-hover:bg-neutral-700'}">
+                        <ItemIcon class="w-4 h-4 flex-none" />
+                      </span>
+                      <span class="truncate">{item.name}</span>
+                    </button>
+                  {/each}
+                </div>
+              </section>
             {/each}
           </div>
 
           <!-- Shift management at bottom of sidebar -->
           <div class="mt-auto pt-4">
-            <p class="px-3 mb-2 text-[10px] font-bold uppercase tracking-[0.18em] text-neutral-400 dark:text-neutral-600">Shift</p>
+          <p class="dashboard-section-label px-3 mb-2 text-[10px] font-bold uppercase tracking-[0.18em] text-neutral-400 dark:text-neutral-600">{role === 'Admin' ? 'Operations status' : 'Register status'}</p>
             {#if activeShift}
               <div class="px-3.5 py-3 rounded-2xl bg-gradient-to-br from-emerald-50 to-emerald-100/50 dark:from-emerald-950/40 dark:to-emerald-900/20 border border-emerald-200/80 dark:border-emerald-800/60 mb-2">
                 <div class="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 text-xs font-bold mb-1">
@@ -667,20 +705,26 @@
         <div
           bind:this={mobileMenuEl}
           transition:fly={{ y: -10, duration: 150 }}
-          class="absolute top-[53px] left-0 right-0 z-30 bg-white dark:bg-neutral-900 border-b border-neutral-200 dark:border-neutral-800 shadow-lg py-2"
+          class="dashboard-mobile-menu absolute top-[53px] left-0 right-0 z-30 bg-white dark:bg-neutral-900 border-b border-neutral-200 dark:border-neutral-800 shadow-lg py-2"
         >
-          {#each filteredNav as item (item.id)}
-            {@const ItemIcon = item.icon}
-            <button
-              onclick={() => { activeTab = item.id; mobileMenuOpen = false; }}
-              class="flex items-center gap-3 w-full px-4 py-2.5 text-sm font-medium transition-colors
-                {activeTab === item.id
-                  ? 'text-[var(--clint-primary)] bg-neutral-50 dark:bg-neutral-800'
-                  : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800'}"
-            >
-              <ItemIcon class="w-4 h-4 flex-none" />
-              {item.name}
-            </button>
+          {#each sidebarNavGroups as group (group.label)}
+            <div class="mb-2 last:mb-0">
+              <p class="px-4 pt-2 pb-1 text-[9px] font-black uppercase tracking-[0.18em] text-neutral-400 dark:text-neutral-500">{group.label}</p>
+              {#each group.items as item (item.id)}
+                {@const ItemIcon = item.icon}
+                <button
+                  onclick={() => { activeTab = item.id; mobileMenuOpen = false; }}
+                  aria-current={activeTab === item.id ? 'page' : undefined}
+                  class="flex items-center gap-3 w-full px-4 py-2.5 text-sm font-medium transition-colors
+                    {activeTab === item.id
+                      ? 'text-[var(--clint-primary)] bg-neutral-50 dark:bg-neutral-800'
+                      : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800'}"
+                >
+                  <ItemIcon class="w-4 h-4 flex-none" />
+                  {item.name}
+                </button>
+              {/each}
+            </div>
           {/each}
         </div>
       {/if}
@@ -689,7 +733,7 @@
       <main class="flex-1 overflow-hidden">
         <NetworkResilienceMonitor />
         {#key activeTab}
-          <div class="h-full overflow-auto" in:fly={{ y: 10, duration: 200 }}>
+          <div class="dashboard-page h-full overflow-auto" in:fly={{ y: 10, duration: 200 }}>
 
             {#if activeTab === 'pos'}
               {#key role}

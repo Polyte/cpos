@@ -1,0 +1,52 @@
+# ClintoPOS background infrastructure: RabbitMQ (job transport) + Redis (local cache).
+#
+# Cloud deployments:
+#   - RabbitMQ: any reachable broker with the MANAGEMENT PLUGIN enabled
+#     (the edge function publishes via the Management HTTP API, port 15672).
+#     Point RABBITMQ_URL at it, e.g. https://mq.example.com:15671
+#   - Redis: Upstash (or any Redis with a REST gateway). Set REDIS_REST_URL +
+#     REDIS_REST_TOKEN as Supabase function secrets. The edge function talks
+#     HTTP-only, so serverless egress always works.
+# Local development: `docker compose up -d` gives you both services below.
+#   - RabbitMQ management UI: http://localhost:15672 (guest/guest by default)
+#   - The compose Redis is for self-hosted/TCP consumers; the edge function
+#     itself uses REDIS_REST_URL when configured.
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    ports:
+      # Override when the defaults are taken, e.g.
+      # RABBITMQ_AMQP_PORT=5673 RABBITMQ_MGMT_PORT=15673 docker compose up -d
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"     # AMQP (production consumers)
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"   # Management HTTP API (edge function + worker)
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-cpos}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-cpos-dev-secret}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  rabbitmq-data:
+  redis-data:

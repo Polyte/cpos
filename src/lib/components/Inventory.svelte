@@ -373,8 +373,12 @@
     return 'General';
   }
 
+  function normalizeBarcode(value: any): string {
+    return String(value || '').trim().replace(/[\s-]/g, '').toUpperCase();
+  }
+
   async function handleBarcodeLookup() {
-    const barcode = productData.barcode.trim();
+    const barcode = normalizeBarcode(productData.barcode);
     if (!/^\d{8,14}$/.test(barcode)) {
       toast.error('Enter a valid numeric barcode first');
       return;
@@ -383,9 +387,11 @@
     barcodeLookupLoading = true;
     barcodeLookupMessage = '';
     try {
-      const localInventoryMatch = items.find((item) => String(item.barcode || '') === barcode);
+      const localInventoryMatch = items.find((item) => normalizeBarcode(item.barcode) === barcode);
       const cloudMatches = localInventoryMatch ? [] : await api.searchProductCloud(barcode);
-      const sharedMatch = Array.isArray(cloudMatches) ? cloudMatches.find((item: any) => String(item.barcode || '') === barcode) : null;
+      const sharedMatch = Array.isArray(cloudMatches)
+        ? cloudMatches.find((item: any) => normalizeBarcode(item.barcode) === barcode)
+        : null;
       const result = localInventoryMatch
         ? { success: true, barcode, product: { ...localInventoryMatch, image_url: localInventoryMatch.imageUrl || localInventoryMatch.image } }
         : sharedMatch
@@ -1252,7 +1258,7 @@
               class="w-full py-3 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-indigo-100 disabled:opacity-40 transition-all flex items-center justify-center gap-2"
             >
               {#if barcodeLookupLoading}<Loader2 size={14} class="animate-spin" />{:else}<Search size={14} />{/if}
-              {barcodeLookupLoading ? 'Looking up product…' : 'Search BarcodeNest'}
+              {barcodeLookupLoading ? 'Searching product sources…' : 'Search Product Cloud / BarcodeNest'}
             </button>
             {#if barcodeLookupMessage}
               <p class="text-[9px] font-bold text-indigo-600 leading-relaxed">{barcodeLookupMessage}</p>

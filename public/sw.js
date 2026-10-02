@@ -10,9 +10,11 @@
  *    transaction buffering for those is handled in the app via IndexedDB + SyncManager.
  */
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `clinton-pos-shell-${VERSION}`;
 const ASSET_CACHE = `clinton-pos-assets-${VERSION}`;
+const TILE_CACHE = `clinton-pos-tiles-${VERSION}`;
+const TILE_CACHE_LIMIT = 400;
 const APP_SHELL = '/index.html';
 
 // Precache the app shell so a cold offline start still resolves the document.
@@ -29,7 +31,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((k) => k !== SHELL_CACHE && k !== ASSET_CACHE)
+          .filter((k) => k !== SHELL_CACHE && k !== ASSET_CACHE && k !== TILE_CACHE)
           .map((k) => caches.delete(k))
       )
     ).then(() => self.clients.claim())
@@ -45,6 +47,19 @@ function isStaticAsset(url) {
   return /\.(?:js|mjs|css|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|webp|ico|json|csv)$/i.test(
     url.pathname
   );
+}
+
+function isMapTile(url) {
+  return /(^|\.)tile\.openstreetmap\.org$/i.test(url.hostname);
+}
+
+async function trimCache(cacheName, maxItems) {
+  try {
+    const cache = await caches.open(cacheName);
+    const keys = await cache.keys();
+    if (keys.length <= maxItems) return;
+    await Promise.all(keys.slice(0, keys.length - maxItems).map((k) => cache.delete(k)));
+  } catch (_) {}
 }
 
 self.addEventListener('fetch', (event) => {
@@ -74,6 +89,27 @@ self.addEventListener('fetch', (event) => {
         const network = fetch(request)
           .then((res) => {
             if (res && res.status === 200) cache.put(request, res.clone());
+            return res;
+          })
+          .catch(() => cached);
+        return cached || network;
+      })
+    );
+    return;
+  }
+
+  // OpenStreetMap tiles -> stale-while-revalidate so previously viewed areas
+  // render instantly on the next visit, while fresh tiles load in the background.
+  if (isMapTile(url) && request.mode === 'cors') {
+    event.respondWith(
+      caches.open(TILE_CACHE).then(async (cache) => {
+        const cached = await cache.match(request);
+        const network = fetch(request)
+          .then((res) => {
+            if (res && (res.status === 200 || res.type === 'opaque')) {
+              cache.put(request, res.clone());
+              trimCache(TILE_CACHE, TILE_CACHE_LIMIT);
+            }
             return res;
           })
           .catch(() => cached);

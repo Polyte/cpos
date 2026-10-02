@@ -7,6 +7,18 @@ import { cors } from 'npm:hono/cors';
 import { logger } from 'npm:hono/logger';
 import { createClient as createTursoClient } from "npm:@libsql/client/http";
 import * as kv from './kv_store.ts';
+import { renderEmailTemplate } from './email-templates.ts';
+import { cacheGet, cacheSet, cacheDel, getCacheStats, cacheBackend, redisConfigured } from './cache.ts';
+import {
+  createJob,
+  getJob,
+  listJobs,
+  patchJob,
+  registerJobHandler,
+  rabbitConfigured,
+  type Job,
+  type JobUpdate,
+} from './queue.ts';
 
 const app = new Hono();
 
@@ -79,29 +91,22 @@ app.get(`${prefix}/notifications`, fetchNotificationsHandler);
 
 const routes = app.basePath(prefix);
 
-// --- Caching Engine (Redis-like behavior using KV Store) ---
+// --- Caching Engine (two-tier: Redis via REST when configured, KV fallback) ---
 const CACHE_TTL = 30; // 30 seconds for aggregate data
 
 const cache = {
   async get(key: string) {
-    try {
-      const cached = await kv.get(`cache:${key}`);
-      if (cached && cached.expiresAt > Date.now()) {
-        console.log(`[Cache] HIT for ${key}`);
-        return cached.data;
-      }
-      console.log(`[Cache] MISS/EXPIRED for ${key}`);
-      return null;
-    } catch (e) {
-      return null;
+    const data = await cacheGet(key);
+    if (data !== null && data !== undefined) {
+      console.log(`[Cache] HIT for ${key} (via ${cacheBackend()})`);
+      return data;
     }
+    console.log(`[Cache] MISS/EXPIRED for ${key}`);
+    return null;
   },
   async set(key: string, data: any, ttlSeconds: number = CACHE_TTL) {
     try {
-      await kv.set(`cache:${key}`, {
-        data,
-        expiresAt: Date.now() + (ttlSeconds * 1000)
-      });
+      await cacheSet(key, data, ttlSeconds);
     } catch (e) {
       console.error(`[Cache] SET ERROR for ${key}:`, e);
     }
@@ -121,13 +126,13 @@ const cache = {
         'stock_list:merchant:M4'
       ];
       // Also invalidate merchant-specific keys if we track them, but for now, clear global aggregations
-      for (const k of keys) await kv.del(`cache:${k}`);
+      for (const k of keys) await cacheDel(k);
     } catch (e) {}
   },
   async invalidateMerchant(mId: string) {
-     await kv.del(`cache:tx_list:${mId}`);
-     await kv.del(`cache:stock_list:${mId}`);
-     await kv.del(`cache:merchants_list`);
+     await cacheDel(`tx_list:${mId}`);
+     await cacheDel(`stock_list:${mId}`);
+     await cacheDel(`merchants_list`);
   }
 };
 
@@ -201,6 +206,21 @@ async function verifyPassword(password: string, hash: string): Promise<boolean> 
   return (await hashPassword(password)) === hash;
 }
 
+function randomHex(byteLength: number): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function requestWebOrigin(c: any): string | null {
+  const raw = c.req.header('Origin');
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(parsed.hostname))) return null;
+    return parsed.origin;
+  } catch { return null; }
+}
+
 // Turso Schema Init
 (async () => {
   try {
@@ -219,6 +239,8 @@ async function verifyPassword(password: string, hash: string): Promise<boolean> 
       },
       { sql: 'CREATE UNIQUE INDEX IF NOT EXISTS users_email_idx ON users(email)', args: [] },
     ], 'write');
+    try { await client.execute('ALTER TABLE users ADD COLUMN username TEXT'); } catch { /* Existing installs already have the column. */ }
+    await client.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_username_idx ON users(lower(username)) WHERE username IS NOT NULL');
     console.log('[Turso] Schema ready');
   } catch (e: any) {
     console.error('[Turso] Schema init error:', e?.message);
@@ -228,11 +250,38 @@ async function verifyPassword(password: string, hash: string): Promise<boolean> 
 // --- Helper Functions ---
 
 // Auth verification helper — extracts user from Bearer token
+
+interface AuthUser {
+  id: string;
+  email: string;
+  role: string;
+  sub: string;
+  merchantId?: string | null;
+  name?: string;
+}
+
+/** Typed accessor for the auth user set by requireAuth. Keeps `deno check` clean. */
+function currentUser(c: any): AuthUser | null {
+  try {
+    return (c.get('authUser') as AuthUser | null) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function getAuthUser(c: any) {
   try {
     const authHeader = c.req.header('Authorization') || '';
     const token = authHeader.split(' ')[1];
     if (!token) return null;
+    // Queue worker bypass: a shared secret lets the background worker act with
+    // admin scope. Only active when WORKER_SECRET is configured server-side.
+    try {
+      const workerSecret = Deno.env.get('WORKER_SECRET') || '';
+      if (workerSecret && token === workerSecret) {
+        return { id: 'queue-worker', email: 'worker@internal', role: 'Admin', merchantId: null, name: 'Queue Worker' };
+      }
+    } catch { /* env unavailable */ }
     const payload = await verifyJWT(token);
     if (!payload) return null;
     return { id: payload.sub, email: payload.email, role: payload.role, merchantId: payload.merchantId, name: payload.name };
@@ -359,7 +408,43 @@ async function createNotification(type: string, message: string) {
     return notification;
 }
 
-// --- Email Notification Queue (simulated — no SMTP configured) ---
+async function sendPlatformEmail(input: {
+  to: string | string[];
+  subject: string;
+  text: string;
+  type: string;
+  ctaLabel?: string;
+  ctaUrl?: string;
+  idempotencyKey?: string;
+}): Promise<{ sent: boolean; providerId?: string; error?: string }> {
+  const apiKey = Deno.env.get('RESEND_API_KEY');
+  const from = Deno.env.get('RESEND_FROM_EMAIL');
+  if (!apiKey || !from) return { sent: false, error: 'Email provider is not configured' };
+  const rendered = renderEmailTemplate(input);
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        ...(input.idempotencyKey ? { 'Idempotency-Key': input.idempotencyKey } : {}),
+      },
+      body: JSON.stringify({ from, to: input.to, subject: input.subject, text: rendered.text, html: rendered.html }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      console.error('[Email] Provider rejected message:', response.status, result);
+      return { sent: false, error: `Email provider returned ${response.status}` };
+    }
+    return { sent: true, providerId: result.id };
+  } catch (error) {
+    console.error('[Email] Delivery request failed:', error);
+    return { sent: false, error: 'Email provider request failed' };
+  }
+}
+
+// All platform notifications use the shared CLINTPOS email layout and Resend delivery.
 async function createEmailNotification(
     to: string,
     subject: string,
@@ -367,19 +452,53 @@ async function createEmailNotification(
     metadata: Record<string, any> = {}
 ) {
     const id = `email_notif:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const delivery = await sendPlatformEmail({
+      to, subject, text: body, type: metadata.type || 'platform',
+      ctaLabel: metadata.ctaLabel, ctaUrl: metadata.ctaUrl,
+      idempotencyKey: metadata.idempotencyKey || id,
+    });
     const record = {
         id,
         to,
         subject,
         body,
-        status: 'sent',  // Simulated as instantly sent since no SMTP configured
-        sentAt: new Date().toISOString(),
-        metadata,
+        status: delivery.sent ? 'sent' : 'failed',
+        sentAt: delivery.sent ? new Date().toISOString() : null,
+        providerId: delivery.providerId || null,
+        error: delivery.error || null,
+        metadata: Object.fromEntries(Object.entries(metadata).filter(([key]) => key !== 'ctaUrl')),
         createdAt: new Date().toISOString()
     };
     await kv.set(id, record);
-    console.log(`[Email] Queued notification to ${to}: "${subject}"`);
+    console.log(`[Email] ${delivery.sent ? 'Sent' : 'Failed'} notification to ${to}: "${subject}"`);
   return record;
+}
+
+async function sendOnboardingAdminEmail(application: any): Promise<{ sent: boolean; providerId?: string; error?: string }> {
+  const apiKey = Deno.env.get('RESEND_API_KEY');
+  const from = Deno.env.get('RESEND_FROM_EMAIL');
+  if (!apiKey || !from) return { sent: false, error: 'Email provider is not configured' };
+
+  const subject = `New merchant onboarding application: ${application.applicationId}`;
+  const text = [
+    'A merchant onboarding application has been submitted successfully.',
+    '',
+    `Application: ${application.applicationId}`,
+    `Business: ${application.businessInfo?.legalName || 'Not provided'}`,
+    `Applicant: ${[application.account?.firstName, application.account?.lastName].filter(Boolean).join(' ') || 'Not provided'}`,
+    `Applicant email: ${application.account?.email || 'Not provided'}`,
+    `Applicant phone: ${application.account?.mobile || 'Not provided'}`,
+    `Uploaded documents: ${(application.documents || []).map((doc: any) => doc.type).join(', ') || 'None'}`,
+    '',
+    'Sign in to CLINTPOS to review the application and its private R2 documents.',
+  ].join('\n');
+
+  try {
+    return await sendPlatformEmail({
+      to: ['admin@roxenterprises.co.za'], subject, text, type: 'onboarding_admin',
+      idempotencyKey: `onboarding-admin-${application.applicationId}`,
+    });
+  } catch (error) { return { sent: false, error: 'Email provider request failed' }; }
 }
 
 function internalBarcode(item: any): string {
@@ -389,10 +508,13 @@ function internalBarcode(item: any): string {
   return `290${String(hash % 1_000_000_000).padStart(9, '0')}`;
 }
 
+function normalizeBarcode(value: any): string {
+  return String(value || '').trim().replace(/[\s-]/g, '').toUpperCase();
+}
+
 function productCloudKey(item: any): string {
-  const rawBarcode = String(item.barcode || '').trim();
   // Treat common barcode formatting differences as the same product.
-  return (rawBarcode ? rawBarcode.replace(/[\s-]/g, '').toUpperCase() : internalBarcode(item));
+  return normalizeBarcode(item.barcode) || internalBarcode(item);
 }
 
 function decodeHtml(value: string): string {
@@ -711,6 +833,56 @@ routes.post('/signup', async (c) => {
   return c.json({ success: true, userId });
 });
 
+routes.post('/onboarding/setup-account', async (c) => {
+  try {
+    const { token, username: rawUsername, password } = await c.req.json();
+    const username = String(rawUsername || '').trim().toLowerCase();
+    if (!/^[a-z0-9._-]{3,24}$/.test(username)) return c.json({ success: false, error: 'Username must be 3–24 characters using letters, numbers, dots, underscores, or hyphens' }, 400);
+    if (typeof password !== 'string' || password.length < 8 || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+      return c.json({ success: false, error: 'Password must be at least 8 characters and include an uppercase letter and a number' }, 400);
+    }
+    if (typeof token !== 'string' || token.length !== 64) return c.json({ success: false, error: 'This setup link is invalid or expired' }, 400);
+    const tokenHash = await sha256Hex(token);
+    const setupKey = `account_setup:${tokenHash}`;
+    const setup = await kv.get(setupKey) as any;
+    if (!setup || setup.used || setup.expiresAt < Date.now()) return c.json({ success: false, error: 'This setup link is invalid or expired' }, 400);
+    const app = await kv.get(setup.applicationKey) as any;
+    if (!app || app.status !== 'Approved' || String(app.account?.email || '').toLowerCase() !== setup.email) {
+      return c.json({ success: false, error: 'Your application must be approved before you can create an account' }, 403);
+    }
+
+    const client = getTursoClient();
+    const existing = await client.execute({ sql: 'SELECT id,email,username FROM users WHERE lower(email)=? OR lower(username)=?', args: [setup.email, username] });
+    if (existing.rows.some((row) => String(row.email || '').toLowerCase() === setup.email)) {
+      return c.json({ success: false, error: 'An account already exists for this email. Contact support to recover access.' }, 409);
+    }
+    if (existing.rows.length) return c.json({ success: false, error: 'That username is already in use' }, 409);
+
+    const userId = crypto.randomUUID();
+    const name = [app.account?.firstName, app.account?.lastName].filter(Boolean).join(' ') || username;
+    const rawProfile = String(app.businessInfo?.type || 'Retail');
+    const profile = ['Retail', 'Forecourt', 'Workshop', 'Restaurant'].includes(rawProfile) ? rawProfile : 'Retail';
+    await client.execute({
+      sql: `INSERT INTO users (id,email,username,password_hash,name,role,merchant_id,profile,status,created_at,email_confirmed)
+            VALUES (?,?,?,?,?,'Manager',?,?, 'Active', ?,1)`,
+      args: [userId, setup.email, username, await hashPassword(password), name, app.merchantId, profile, new Date().toISOString()],
+    });
+    await kv.set(`user:${userId}`, { id: userId, email: setup.email, username, name, role: 'Manager', merchantId: app.merchantId, profile, status: 'Active', createdAt: new Date().toISOString() });
+    const merchantUsersKey = `merchant_users:${app.merchantId}`;
+    const merchantUsers = (await kv.get(merchantUsersKey)) || [];
+    if (!merchantUsers.includes(userId)) await kv.set(merchantUsersKey, [...merchantUsers, userId]);
+    setup.used = true;
+    setup.usedAt = new Date().toISOString();
+    await kv.set(setupKey, setup);
+    await createAuditLog(app.merchantId, 'MERCHANT_ACCOUNT_CREATED', { username, email: setup.email });
+    return c.json({ success: true, username, email: setup.email });
+  } catch (error: any) {
+    if (String(error?.message || '').toLowerCase().includes('unique')) return c.json({ success: false, error: 'That username is already in use' }, 409);
+    console.error('[Account setup] Failed:', error);
+    return c.json({ success: false, error: 'Could not create your account' }, 500);
+  }
+});
+
 routes.post('/login', async (c) => {
   try {
     const { email, password } = await c.req.json();
@@ -718,8 +890,8 @@ routes.post('/login', async (c) => {
 
     const client = getTursoClient();
     const result = await client.execute({
-      sql: 'SELECT id, email, password_hash, name, role, merchant_id, profile, status FROM users WHERE email = ?',
-      args: [email.toLowerCase()],
+      sql: 'SELECT id, email, username, password_hash, name, role, merchant_id, profile, status FROM users WHERE lower(email) = ? OR lower(username) = ? LIMIT 1',
+      args: [email.toLowerCase(), email.toLowerCase()],
     });
 
     if (result.rows.length === 0) return c.json({ error: 'Invalid credentials' }, 401);
@@ -2219,7 +2391,7 @@ routes.get('/stock', async (c) => {
 });
 
 routes.get('/product-cloud', async (c) => {
-  const authUser = c.get('authUser');
+  const authUser = currentUser(c);
   if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
     return c.json({ error: 'Product Cloud access denied' }, 403);
   }
@@ -2233,11 +2405,11 @@ routes.get('/product-cloud', async (c) => {
   const client = getTursoClient();
   const result = query
     ? await client.execute({
-        sql: 'SELECT value FROM kv_store WHERE key LIKE ? AND lower(value) LIKE ? ORDER BY key LIMIT ?',
+        sql: "SELECT value FROM kv_store WHERE prefix = 'product_cloud:' AND key LIKE ? AND lower(value) LIKE ? ORDER BY key LIMIT ?",
         args: ['product_cloud:%', `%${query}%`, responseLimit],
       })
     : await client.execute({
-        sql: 'SELECT value FROM kv_store WHERE key LIKE ? ORDER BY key LIMIT ?',
+        sql: "SELECT value FROM kv_store WHERE prefix = 'product_cloud:' AND key LIKE ? ORDER BY key LIMIT ?",
         args: ['product_cloud:%', responseLimit],
       });
   const products = result.rows.map((row: any) => {
@@ -2251,31 +2423,79 @@ routes.get('/product-cloud', async (c) => {
 });
 
 routes.get('/product-cloud/count', async (c) => {
-  const authUser = c.get('authUser');
+  const authUser = currentUser(c);
   if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
     return c.json({ error: 'Product Cloud access denied' }, 403);
   }
   const client = getTursoClient();
   const result = await client.execute({
-    sql: 'SELECT COUNT(*) AS count FROM kv_store WHERE key LIKE ?',
+    sql: "SELECT COUNT(*) AS count FROM kv_store WHERE prefix = 'product_cloud:' AND key LIKE ?",
     args: ['product_cloud:%'],
   });
   return c.json({ count: Number(result.rows[0]?.count || 0) });
 });
 
+const PRODUCT_IMPORT_SETTINGS_KEY = 'settings:product_importer';
+const LOYALTYHUB_IMPORT_STATUS_KEY = 'settings:loyaltyhub_import_status';
+
+// Import status goes through the two-tier cache (Redis when configured).
+// Tolerates the legacy raw shape written before the cache layer existed.
+async function getImportStatus(): Promise<any> {
+  const status = await cacheGet<any>(LOYALTYHUB_IMPORT_STATUS_KEY);
+  if (status && typeof status === 'object' && 'data' in status && 'expiresAt' in status && !('processedRows' in status)) {
+    return (status as { data: unknown }).data;
+  }
+  return status;
+}
+
+async function setImportStatus(status: unknown): Promise<void> {
+  await cacheSet(LOYALTYHUB_IMPORT_STATUS_KEY, status, 0); // persist, no expiry
+}
+
+routes.get('/product-cloud/import-status', async (c) => {
+  const authUser = currentUser(c);
+  if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Product Cloud access denied' }, 403);
+  }
+  const status = await getImportStatus();
+  return c.json(status || { status: 'never', sourceRows: null, processedRows: 0, completedAt: null });
+});
+
+routes.get('/admin/product-import-settings', async (c) => {
+  const authUser = currentUser(c);
+  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Admin access required' }, 403);
+  const settings = await kv.get(PRODUCT_IMPORT_SETTINGS_KEY);
+  return c.json({ enabled: Boolean(settings?.enabled), offset: Number(settings?.offset || 0), updatedAt: settings?.updatedAt || null });
+});
+
+routes.put('/admin/product-import-settings', async (c) => {
+  const authUser = currentUser(c);
+  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Admin access required' }, 403);
+  const body = await c.req.json().catch(() => ({}));
+  const current = await kv.get(PRODUCT_IMPORT_SETTINGS_KEY);
+  const settings = {
+    enabled: Boolean(body.enabled),
+    offset: Math.max(Number(body.offset ?? current?.offset) || 0, 0),
+    updatedAt: new Date().toISOString(),
+    updatedBy: authUser.email || authUser.sub || null,
+  };
+  await kv.set(PRODUCT_IMPORT_SETTINGS_KEY, settings);
+  return c.json(settings);
+});
+
 routes.get('/product-cloud/page', async (c) => {
-  const authUser = c.get('authUser');
+  const authUser = currentUser(c);
   if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
     return c.json({ error: 'Product Cloud access denied' }, 403);
   }
   const query = (c.req.query('query') || '').trim().toLowerCase();
   const page = Math.max(Number(c.req.query('page')) || 1, 1);
-  const limit = Math.min(Math.max(Number(c.req.query('limit')) || 100, 1), 100);
+  const limit = Math.min(Math.max(Number(c.req.query('limit')) || 100, 1), 2000);
   const offset = (page - 1) * limit;
   const client = getTursoClient();
   const whereSql = query
-    ? 'key LIKE ? AND lower(value) LIKE ?'
-    : 'key LIKE ?';
+    ? "prefix = 'product_cloud:' AND key LIKE ? AND lower(value) LIKE ?"
+    : "prefix = 'product_cloud:' AND key LIKE ?";
   const whereArgs = query ? ['product_cloud:%', `%${query}%`] : ['product_cloud:%'];
   const [countResult, rowsResult] = await Promise.all([
     client.execute({ sql: `SELECT COUNT(*) AS count FROM kv_store WHERE ${whereSql}`, args: whereArgs }),
@@ -2291,7 +2511,7 @@ routes.get('/product-cloud/page', async (c) => {
 });
 
 routes.delete('/product-cloud/:barcode', async (c) => {
-  const authUser = c.get('authUser');
+  const authUser = currentUser(c);
   if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Product Cloud deletion requires Admin access' }, 403);
   const barcode = String(c.req.param('barcode') || '').trim().replace(/[\s-]/g, '').toUpperCase();
   if (!barcode) return c.json({ error: 'Barcode required' }, 400);
@@ -2364,34 +2584,64 @@ async function resolveLoyaltyHubCatalogClient(): Promise<{ url: string; key: str
   return null;
 }
 
-routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
-  const authUser = c.get('authUser');
-  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'LoyaltyHub import requires Admin access' }, 403);
-
-  const body = await c.req.json().catch(() => ({}));
-  const offset = Math.max(Number(body.offset) || 0, 0);
-  const limit = Math.min(Math.max(Number(body.limit) || 250, 1), 500);
+// Single LoyaltyHub catalogue batch. Shared by the direct import endpoint
+// and background import jobs so both paths stay identical.
+async function runLoyaltyHubCatalogBatch(rawCursor: string, rawLimit: number): Promise<{ status: number; body: any }> {
+  const cursor = typeof rawCursor === 'string' && rawCursor.length <= 128 ? rawCursor : '';
+  if (cursor && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cursor)) {
+    return { status: 400, body: { success: false, error: 'Invalid LoyaltyHub catalogue cursor' } };
+  }
+  const limit = Math.min(Math.max(Number(rawLimit) || 250, 1), 500);
   try {
     const client = await resolveLoyaltyHubCatalogClient();
-    if (!client) return c.json({ success: false, error: 'LoyaltyHub catalogue configuration unavailable. Set LOYALTYHUB_SUPABASE_URL and LOYALTYHUB_SUPABASE_ANON_KEY on the server.' }, 502);
+    if (!client) return { status: 502, body: { success: false, error: 'LoyaltyHub catalogue configuration unavailable. Set LOYALTYHUB_SUPABASE_URL and LOYALTYHUB_SUPABASE_ANON_KEY on the server.' } };
     const { url: supabaseUrl, key: supabaseKey } = client;
+    let batchLimit = limit;
     const params = new URLSearchParams({
-      select: 'retailer,retailer_sku,barcode,name,brand,price,currency,unit_size,category,image_url,product_url,in_stock',
-      offset: String(offset),
-      limit: String(limit),
+      select: 'id,retailer,retailer_sku,barcode,name,brand,price,currency,unit_size,category,image_url,product_url,in_stock',
+      order: 'id.asc',
+      limit: String(batchLimit),
     });
-    const response = await fetch(`${supabaseUrl}/rest/v1/product_prices?${params}`, {
-      headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' },
-    });
-    if (!response.ok) {
-      const upstreamError = (await response.text().catch(() => '')).slice(0, 240);
-      return c.json({ success: false, error: `LoyaltyHub catalogue returned HTTP ${response.status}${upstreamError ? `: ${upstreamError}` : ''}` }, 502);
+    // Keyset pagination on a random uuid `id` is not reliable (it can jump past
+    // or skip most of the table), so resume by offset: when a cursor is given
+    // we have already processed `processedRows` rows, which is the offset.
+    const currentImportStatus = await getImportStatus();
+    const startOffset = cursor ? Math.max(0, Number(currentImportStatus?.processedRows || 0)) : 0;
+    if (startOffset > 0) params.set('offset', String(startOffset));
+    let response: Response | null = null;
+    let upstreamError = '';
+    // An exact PostgREST count scans the whole source table and is not needed
+    // for importing. Use the planner estimate for progress and ask for a
+    // smaller page when Postgres cancels a large source query.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      params.set('limit', String(batchLimit));
+      response = await fetch(`${supabaseUrl}/rest/v1/product_prices?${params}`, {
+        headers: {
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
+          Accept: 'application/json',
+          ...(!cursor ? { Prefer: 'count=planned' } : {}),
+        },
+      });
+      if (response.ok) break;
+      upstreamError = (await response.text().catch(() => '')).slice(0, 240);
+      const queryTimedOut = response.status === 500 && /57014|statement timeout/i.test(upstreamError);
+      if (!queryTimedOut || attempt === 2 || batchLimit <= 100) {
+        return { status: 502, body: { success: false, error: `LoyaltyHub catalogue returned HTTP ${response.status}${upstreamError ? `: ${upstreamError}` : ''}` } };
+      }
+      batchLimit = Math.max(100, Math.floor(batchLimit / 2));
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
     }
+    if (!response?.ok) return { status: 502, body: { success: false, error: `LoyaltyHub catalogue request failed${upstreamError ? `: ${upstreamError}` : ''}` } };
     const rows = await response.json();
-    if (!Array.isArray(rows)) return c.json({ success: false, error: 'Invalid LoyaltyHub catalogue response' }, 502);
-    console.log(`[LoyaltyHub catalogue] fetched ${rows.length} rows at offset ${offset} (requested ${limit})`);
-    if (offset === 0 && rows.length === 0) {
-      return c.json({ success: false, error: 'LoyaltyHub catalogue returned no products for the first batch' }, 502);
+    if (!Array.isArray(rows)) return { status: 502, body: { success: false, error: 'Invalid LoyaltyHub catalogue response' } };
+    const nextCursor = rows.length > 0 ? String(rows[rows.length - 1]?.id || '') : '';
+    if (rows.length > 0 && !nextCursor) {
+      return { status: 502, body: { success: false, error: 'LoyaltyHub catalogue row is missing its pagination id' } };
+    }
+    console.log(`[LoyaltyHub catalogue] fetched ${rows.length} rows after cursor ${cursor ? 'present' : 'start'} (requested ${limit})`);
+    if (!cursor && rows.length === 0) {
+      return { status: 502, body: { success: false, error: 'LoyaltyHub catalogue returned no products for the first batch' } };
     }
 
     const importItems = rows.map((row: any) => {
@@ -2421,16 +2671,45 @@ routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
       };
     });
     const imported = await upsertProductCloudBatch(importItems);
-    return c.json({ success: true, offset, discovered: rows.length, imported, hasMore: rows.length === limit, source: 'LoyaltyHub catalogue' });
+    const contentRange = response.headers.get('content-range') || '';
+    const totalRowsMatch = contentRange.match(/\/(\d+)$/);
+    const totalRows = !cursor && totalRowsMatch ? Number(totalRowsMatch[1]) : undefined;
+    const hasMore = rows.length === batchLimit;
+    const importStatus = {
+      status: hasMore ? 'running' : 'complete',
+      source: 'LoyaltyHub',
+      sourceRows: totalRows ?? (Number(currentImportStatus?.sourceRows || 0) || null),
+      sourceRowsEstimated: totalRows ? true : Boolean(currentImportStatus?.sourceRowsEstimated),
+      nextCursor: hasMore ? nextCursor : null,
+      processedRows: (cursor ? Number(currentImportStatus?.processedRows || 0) : 0) + rows.length,
+      indexedRows: (cursor ? Number(currentImportStatus?.indexedRows || 0) : 0) + imported,
+      startedAt: !cursor ? new Date().toISOString() : (currentImportStatus?.startedAt || new Date().toISOString()),
+      completedAt: hasMore ? null : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await setImportStatus(importStatus);
+    return { status: 200, body: { success: true, cursor, nextCursor: importStatus.nextCursor, discovered: rows.length, imported, processedRows: importStatus.processedRows, hasMore, batchLimit, ...(totalRows ? { totalRows, totalRowsEstimated: true } : {}), source: 'LoyaltyHub catalogue' } };
   } catch (e: any) {
     console.error('[LoyaltyHub catalogue import] Error:', e?.message || e);
-    return c.json({ success: false, error: 'LoyaltyHub catalogue import failed' }, 502);
+    return { status: 502, body: { success: false, error: 'LoyaltyHub catalogue import failed' } };
   }
+}
+
+routes.post('/product-cloud/import-loyaltyhub-catalog', async (c) => {
+  const authUser = currentUser(c);
+  if (!authUser || !['Admin', 'StockController'].includes(authUser.role)) return c.json({ error: 'LoyaltyHub import requires Admin or Stock Controller access' }, 403);
+
+  const body = await c.req.json().catch(() => ({}));
+  const result = await runLoyaltyHubCatalogBatch(
+    typeof body.cursor === 'string' ? body.cursor : '',
+    Number(body.limit),
+  );
+  return c.json(result.body, result.status as 200);
 });
 
 routes.post('/product-cloud/import-loyaltyhub', async (c) => {
-  const authUser = c.get('authUser');
-  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'LoyaltyHub import requires Admin access' }, 403);
+  const authUser = currentUser(c);
+  if (!authUser || !['Admin', 'StockController'].includes(authUser.role)) return c.json({ error: 'LoyaltyHub import requires Admin or Stock Controller access' }, 403);
 
   const bearer = Deno.env.get('LOYALTYHUB_BEARER_TOKEN');
   if (!bearer) return c.json({ success: false, error: 'LoyaltyHub is not configured on the server' }, 503);
@@ -2471,8 +2750,8 @@ routes.post('/product-cloud/import-loyaltyhub', async (c) => {
 });
 
 routes.post('/product-cloud/enrich-barcodenest', async (c) => {
-  const authUser = c.get('authUser');
-  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Product Cloud enrichment requires Admin access' }, 403);
+  const authUser = currentUser(c);
+  if (!authUser || !['Admin', 'StockController'].includes(authUser.role)) return c.json({ error: 'Product Cloud enrichment requires Admin or Stock Controller access' }, 403);
 
   const apiKey = Deno.env.get('BARCODENEST_API_KEY');
   if (!apiKey) return c.json({ success: false, error: 'BarcodeNest is not configured on the server' }, 503);
@@ -2548,9 +2827,24 @@ routes.post('/product-cloud/enrich-barcodenest', async (c) => {
 });
 
 routes.get('/product-lookup', async (c) => {
-  const barcode = c.req.query('barcode') || '';
+  const barcode = normalizeBarcode(c.req.query('barcode'));
   if (!/^\d{8,14}$/.test(barcode)) {
     return c.json({ success: false, error: 'Enter a valid numeric barcode (8–14 digits)' }, 400);
+  }
+
+  // Prefer the first-party catalogue before calling the external provider.
+  const productCloudMatch = await kv.get(`product_cloud:${barcode}`);
+  if (productCloudMatch) {
+    return c.json({
+      success: true,
+      found: true,
+      barcode: productCloudMatch.barcode || barcode,
+      product: {
+        ...productCloudMatch,
+        image_url: productCloudMatch.image_url || productCloudMatch.imageUrl || productCloudMatch.image || null,
+      },
+      source: { name: 'Product Cloud', type: 'product_cloud' },
+    });
   }
 
   const apiKey = Deno.env.get('BARCODENEST_API_KEY');
@@ -2649,8 +2943,112 @@ routes.post('/job-cards', async (c) => {
 });
 
 // --- Onboarding & Applications ---
+routes.post('/onboarding/email/send-otp', async (c) => {
+  try {
+    const { email } = await c.req.json();
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const origin = requestWebOrigin(c);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || !origin) {
+      return c.json({ success: false, error: 'Enter a valid email address from the onboarding page' }, 400);
+    }
+    const registered = await getTursoClient().execute({ sql: 'SELECT id FROM users WHERE lower(email)=?', args: [normalizedEmail] });
+    if (registered.rows.length) return c.json({ success: false, error: 'An account already exists for this email. Sign in or recover your password.' }, 409);
+    const emailHash = await sha256Hex(normalizedEmail);
+    const key = `onboarding_email_otp:${emailHash}`;
+    const now = Date.now();
+    const previous = await kv.get(key) as any;
+    if (previous?.lastSentAt && now - previous.lastSentAt < 60_000) {
+      return c.json({ success: false, error: 'Wait one minute before requesting another code' }, 429);
+    }
+    const hourAgo = now - 60 * 60 * 1000;
+    const recentSends = (previous?.sentAt || []).filter((timestamp: number) => timestamp > hourAgo);
+    if (recentSends.length >= 5) return c.json({ success: false, error: 'Too many codes requested. Try again in an hour.' }, 429);
+
+    const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, '0');
+    const expiresAt = now + 10 * 60 * 1000;
+    const codeHash = await sha256Hex(`${normalizedEmail}:${code}:${Deno.env.get('JWT_SECRET') || 'clintpos-otp'}`);
+    await kv.set(key, { codeHash, expiresAt, attempts: 0, lastSentAt: now, sentAt: [...recentSends, now], origin });
+    const delivery = await sendPlatformEmail({
+      to: normalizedEmail,
+      subject: 'Your CLINTPOS email verification code',
+      text: `Use this code to verify your email address:\n\n${code}\n\nThe code expires in 10 minutes. If you did not request it, you can ignore this email.`,
+      type: 'email_verification',
+      idempotencyKey: `email-verify-${emailHash}-${Math.floor(now / 60_000)}`,
+    });
+    if (!delivery.sent) return c.json({ success: false, error: 'We could not send the verification email. Try again shortly.' }, 502);
+    return c.json({ success: true, expiresInSeconds: 600 });
+  } catch (error) {
+    console.error('[Onboarding OTP] Send failed:', error);
+    return c.json({ success: false, error: 'Could not send verification code' }, 500);
+  }
+});
+
+routes.post('/onboarding/email/verify-otp', async (c) => {
+  try {
+    const { email, code } = await c.req.json();
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const origin = requestWebOrigin(c);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || !/^\d{6}$/.test(String(code || '')) || !origin) {
+      return c.json({ success: false, error: 'Enter the six-digit code sent to your email' }, 400);
+    }
+    const emailHash = await sha256Hex(normalizedEmail);
+    const key = `onboarding_email_otp:${emailHash}`;
+    const otp = await kv.get(key) as any;
+    if (!otp || otp.expiresAt < Date.now() || otp.origin !== origin) return c.json({ success: false, error: 'That code has expired. Request a new one.' }, 400);
+    if (otp.attempts >= 5) return c.json({ success: false, error: 'Too many incorrect attempts. Request a new code.' }, 429);
+    const expectedHash = await sha256Hex(`${normalizedEmail}:${String(code)}:${Deno.env.get('JWT_SECRET') || 'clintpos-otp'}`);
+    if (expectedHash !== otp.codeHash) {
+      otp.attempts += 1;
+      await kv.set(key, otp);
+      return c.json({ success: false, error: 'That code is incorrect' }, 400);
+    }
+    await kv.del(key);
+    const verificationToken = randomHex(32);
+    const tokenHash = await sha256Hex(verificationToken);
+    await kv.set(`onboarding_email_verified:${tokenHash}`, {
+      email: normalizedEmail,
+      origin,
+      expiresAt: Date.now() + 30 * 60 * 1000,
+      used: false,
+    });
+    return c.json({ success: true, verificationToken });
+  } catch (error) {
+    console.error('[Onboarding OTP] Verify failed:', error);
+    return c.json({ success: false, error: 'Could not verify email' }, 500);
+  }
+});
+
 routes.post('/onboarding', async (c) => {
     const body = await c.req.json();
+    const email = String(body.account?.email || '').trim().toLowerCase();
+    const verificationToken = String(body.emailVerificationToken || '');
+    const verificationHash = verificationToken ? await sha256Hex(verificationToken) : '';
+    const emailVerification = verificationHash ? await kv.get(`onboarding_email_verified:${verificationHash}`) as any : null;
+    if (!emailVerification || emailVerification.used || emailVerification.expiresAt < Date.now() || emailVerification.email !== email || emailVerification.origin !== requestWebOrigin(c)) {
+      return c.json({ success: false, error: 'Verify this email address before submitting your application' }, 400);
+    }
+    const documents = Array.isArray(body.documents) ? body.documents : [];
+    const supportedDocumentTypes = new Set(['cipc', 'id', 'bank', 'proof']);
+    const requiredDocumentTypes = ['cipc', 'id'];
+    for (const type of requiredDocumentTypes) {
+      if (!documents.some((doc: any) => doc?.type === type && typeof doc.path === 'string')) {
+        return c.json({ success: false, error: `Required ${type} document is missing` }, 400);
+      }
+    }
+    const seenDocumentTypes = new Set<string>();
+    for (const doc of documents) {
+      if (!doc || !supportedDocumentTypes.has(doc.type) || seenDocumentTypes.has(doc.type)) {
+        return c.json({ success: false, error: 'Invalid or duplicate onboarding document' }, 400);
+      }
+      seenDocumentTypes.add(doc.type);
+      if (typeof doc.path !== 'string' || !/^onboarding\/[a-f0-9-]+\.(pdf|jpg|png)$/.test(doc.path)) {
+        return c.json({ success: false, error: 'An onboarding document has an invalid storage path' }, 400);
+      }
+      const receipt = await kv.get(`onboarding_upload:${doc.path}`);
+      if (!receipt || receipt.path !== doc.path) {
+        return c.json({ success: false, error: 'An onboarding document is not confirmed in R2. Upload it again.' }, 400);
+      }
+    }
     const ts = Date.now();
     const seq = Math.floor(Math.random() * 9000) + 1000;
     const applicationId = `APP-${new Date().getFullYear()}-${seq}`;
@@ -2683,6 +3081,8 @@ routes.post('/onboarding', async (c) => {
         type: body.businessInfo?.type || 'Retail',
         status: 'Pending',
         onboardingProgress: 100,
+        applicantEmail: email,
+        applicantName: [body.account?.firstName, body.account?.lastName].filter(Boolean).join(' '),
         createdAt: new Date().toISOString(),
         plan: selectedPlan,
         billingCycle,
@@ -2706,18 +3106,21 @@ routes.post('/onboarding', async (c) => {
         account: body.account ? { 
             firstName: body.account.firstName, 
             lastName: body.account.lastName, 
-            email: body.account.email,
+            email,
             mobile: body.account.mobile
         } : {},
         businessInfo: body.businessInfo || {},
         banking: body.banking ? { bankName: body.banking.bankName, accountType: body.banking.accountType } : {},
-        documents: body.documents || [],
+        documents,
         location: body.location || {},
         hardware: body.hardware || {},
         plan: { selected: selectedPlan, billing: billingCycle, trialStart: trialStartDate, trialEnd: trialEndDate },
-        agreements: body.agreements || {}
+        agreements: body.agreements || {},
+        emailOrigin: emailVerification.origin
     };
     await kv.set(id, application);
+    emailVerification.used = true;
+    await kv.set(`onboarding_email_verified:${verificationHash}`, emailVerification);
     
     // Create notification for admin
     const nId = `notif:${ts + 1}`;
@@ -2731,8 +3134,33 @@ routes.post('/onboarding', async (c) => {
     
     await createAuditLog('system', 'MERCHANT_ONBOARDING_SUBMITTED', { applicationId, onboardingId: id, merchantId: mId });
     await cache.invalidate('merchants_list');
+
+    const emailResult = await sendOnboardingAdminEmail(application);
+    const welcomeResult = await createEmailNotification(
+      email,
+      `Welcome to CLINTPOS — application ${applicationId} received`,
+      `Hello ${application.account.firstName || 'there'},\n\nThank you for completing your CLINTPOS merchant application for ${application.businessInfo?.legalName || 'your business'}. We have received it and our compliance team will review it.\n\nApplication reference: ${applicationId}\n\nOnce your application is approved, we will send you a secure link to choose your username and create your password. You do not need to create a password while your application is under review.`,
+      { type: 'welcome', applicationId, merchantId: mId, idempotencyKey: `onboarding-welcome-${applicationId}` }
+    );
+    const emailId = `email_notif:onboarding-${applicationId}`;
+    try {
+        await kv.set(emailId, {
+            id: emailId,
+            to: 'admin@roxenterprises.co.za',
+            subject: `New merchant onboarding application: ${applicationId}`,
+            body: `Application ${applicationId} for ${application.businessInfo.legalName || 'Unknown business'}`,
+            status: emailResult.sent ? 'sent' : 'failed',
+            sentAt: emailResult.sent ? new Date().toISOString() : null,
+            providerId: emailResult.providerId || null,
+            error: emailResult.error || null,
+            metadata: { type: 'onboarding_admin', applicationId, merchantId: mId },
+            createdAt: new Date().toISOString(),
+        });
+    } catch (error) {
+        console.error('[Onboarding email] Could not record notification result:', error);
+    }
     
-    return c.json({ success: true, applicationId, merchantId: mId, plan: selectedPlan, trialEnd: trialEndDate });
+    return c.json({ success: true, applicationId, merchantId: mId, plan: selectedPlan, trialEnd: trialEndDate, emailSent: emailResult.sent, welcomeEmailSent: welcomeResult.status === 'sent' });
 });
 
 // GET trial/plan status for a merchant
@@ -2803,6 +3231,8 @@ routes.get('/applications/:id', async (c) => {
 // Reject an application
 routes.post('/applications/:id/reject', async (c) => {
     try {
+        const actor = await getAuthUser(c);
+        if (!actor || String(actor.role).toLowerCase() !== 'admin') return c.json({ error: 'Administrator access is required' }, 403);
         const id = decodeURIComponent(c.req.param('id'));
         const { reason } = await c.req.json();
         
@@ -2829,16 +3259,18 @@ routes.post('/applications/:id/reject', async (c) => {
         
         // Dispatch email notification to applicant
         const applicantEmail = app.account?.email;
+        let emailDispatched = false;
         if (applicantEmail) {
-            await createEmailNotification(
+            const rejectionEmail = await createEmailNotification(
                 applicantEmail,
                 `CLINTPOS: Merchant Application Update — ${app.applicationId}`,
                 `Dear ${app.account?.firstName || 'Applicant'},\n\nWe regret to inform you that your merchant application (${app.applicationId}) for "${app.businessInfo?.legalName || 'your business'}" has not been approved at this time.\n\nReason: ${reason || 'Application did not meet requirements'}\n\nIf you believe this is in error, please contact our support team at support@clintpos.co.za.\n\n— CLINTPOS Compliance Team`,
                 { type: 'rejection', applicationId: app.applicationId, merchantId: app.merchantId }
             );
+            emailDispatched = rejectionEmail.status === 'sent';
         }
         
-        return c.json({ success: true, emailDispatched: !!applicantEmail });
+        return c.json({ success: true, emailDispatched });
     } catch (e: any) {
         console.error('[applications] Reject error:', e);
         return c.json({ error: 'Failed to reject application', details: e.message }, 500);
@@ -2848,6 +3280,8 @@ routes.post('/applications/:id/reject', async (c) => {
 // Mark application as approved (called after /approve-merchant succeeds)
 routes.post('/applications/:id/approve', async (c) => {
     try {
+        const actor = await getAuthUser(c);
+        if (!actor || String(actor.role).toLowerCase() !== 'admin') return c.json({ error: 'Administrator access is required' }, 403);
         const id = decodeURIComponent(c.req.param('id'));
         const app = await kv.get(id);
         if (!app) return c.json({ error: 'Application not found' }, 404);
@@ -2883,14 +3317,148 @@ routes.post('/apply', async (c) => {
 });
 
 routes.post('/upload', async (c) => {
-  // TODO: Wire up a storage provider (Cloudflare R2, S3, etc.) after Turso migration
-  return c.json({ error: 'File upload requires a storage provider — not yet configured' }, 503);
+  const accountId = Deno.env.get('R2_ACCOUNT_ID');
+  const accessKeyId = Deno.env.get('R2_ACCESS_KEY_ID');
+  const secretAccessKey = Deno.env.get('R2_SECRET_ACCESS_KEY');
+  const bucket = Deno.env.get('R2_BUCKET_NAME');
+  if (!accountId || !accessKeyId || !secretAccessKey || !bucket) {
+    return c.json({ error: 'Onboarding file storage is not configured' }, 503);
+  }
+
+  try {
+    const form = await c.req.formData();
+    const file = form.get('file');
+    if (!(file instanceof File)) return c.json({ error: 'A file is required' }, 400);
+    if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+      return c.json({ error: 'File must be between 1 byte and 10 MB' }, 413);
+    }
+    const allowedTypes: Record<string, string> = {
+      'application/pdf': 'pdf',
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+    };
+    const extension = allowedTypes[file.type];
+    if (!extension) return c.json({ error: 'Only PDF, JPG, and PNG files are supported' }, 415);
+
+    // Keep onboarding documents private in R2 and use an opaque key rather than
+    // exposing the applicant's original filename in the object URL.
+    const key = `onboarding/${crypto.randomUUID()}.${extension}`;
+    const body = new Uint8Array(await file.arrayBuffer());
+    const payloadHash = await sha256Hex(body);
+    const now = new Date();
+    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+    const dateStamp = amzDate.slice(0, 8);
+    const region = 'auto';
+    const service = 's3';
+    const host = `${accountId}.r2.cloudflarestorage.com`;
+    const canonicalUri = `/${encodeURIComponent(bucket)}/${key.split('/').map(encodeURIComponent).join('/')}`;
+    const canonicalHeaders = `host:${host}\n` +
+      `content-type:${file.type}\n` +
+      `x-amz-content-sha256:${payloadHash}\n` +
+      `x-amz-date:${amzDate}\n`;
+    const signedHeaders = 'content-type;host;x-amz-content-sha256;x-amz-date';
+    const canonicalRequest = `PUT\n${canonicalUri}\n\n${canonicalHeaders}${signedHeaders}\n${payloadHash}`;
+    const scope = `${dateStamp}/${region}/${service}/aws4_request`;
+    const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${await sha256Hex(new TextEncoder().encode(canonicalRequest))}`;
+    const signingKey = await getR2SigningKey(secretAccessKey, dateStamp, region, service);
+    const signature = await hmacHex(signingKey, stringToSign);
+    const authorization = `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    const result = await fetch(`https://${host}${canonicalUri}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': file.type,
+        'X-Amz-Content-Sha256': payloadHash,
+        'X-Amz-Date': amzDate,
+      },
+      body,
+    });
+    if (!result.ok) {
+      console.error('[R2 upload] Object write failed:', result.status, await result.text());
+      return c.json({ error: 'Could not store onboarding document' }, 502);
+    }
+    await kv.set(`onboarding_upload:${key}`, {
+      path: key,
+      name: file.name,
+      size: file.size,
+      contentType: file.type,
+      uploadedAt: new Date().toISOString(),
+    });
+    return c.json({ success: true, name: file.name, path: key, size: file.size });
+  } catch (error) {
+    console.error('[R2 upload] Upload failed:', error);
+    return c.json({ error: 'Could not store onboarding document' }, 500);
+  }
 });
 
+async function sha256Hex(value: string | BufferSource): Promise<string> {
+  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hmac(key: BufferSource, value: string): Promise<ArrayBuffer> {
+  const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(value));
+}
+
+async function hmacHex(key: BufferSource, value: string): Promise<string> {
+  const digest = new Uint8Array(await hmac(key, value));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function getR2SigningKey(secret: string, date: string, region: string, service: string): Promise<ArrayBuffer> {
+  const dateKey = await hmac(new TextEncoder().encode(`AWS4${secret}`), date);
+  const regionKey = await hmac(dateKey, region);
+  const serviceKey = await hmac(regionKey, service);
+  return hmac(serviceKey, 'aws4_request');
+}
+
 routes.post('/signed-url', async (c) => {
-  // TODO: Wire up a storage provider after Turso migration
-  return c.json({ error: 'Signed URLs require a storage provider — not yet configured' }, 503);
+  const authUser = currentUser(c);
+  if (!authUser || authUser.role !== 'Admin') return c.json({ error: 'Admin access required' }, 403);
+  const accountId = Deno.env.get('R2_ACCOUNT_ID');
+  const accessKeyId = Deno.env.get('R2_ACCESS_KEY_ID');
+  const secretAccessKey = Deno.env.get('R2_SECRET_ACCESS_KEY');
+  const bucket = Deno.env.get('R2_BUCKET_NAME');
+  if (!accountId || !accessKeyId || !secretAccessKey || !bucket) {
+    return c.json({ error: 'Onboarding file storage is not configured' }, 503);
+  }
+  const { path } = await c.req.json().catch(() => ({}));
+  if (typeof path !== 'string' || !/^onboarding\/[a-f0-9-]+\.(pdf|jpg|png)$/.test(path)) {
+    return c.json({ error: 'Invalid onboarding document path' }, 400);
+  }
+
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const region = 'auto';
+  const service = 's3';
+  const host = `${accountId}.r2.cloudflarestorage.com`;
+  const canonicalUri = `/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+  const scope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const credential = `${accessKeyId}/${scope}`;
+  const query = new URLSearchParams({
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': credential,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': '900',
+    'X-Amz-SignedHeaders': 'host',
+  });
+  const canonicalQuery = [...query.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${awsEncode(key)}=${awsEncode(value)}`)
+    .join('&');
+  const canonicalRequest = `GET\n${canonicalUri}\n${canonicalQuery}\nhost:${host}\n\nhost\nUNSIGNED-PAYLOAD`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${await sha256Hex(new TextEncoder().encode(canonicalRequest))}`;
+  const signingKey = await getR2SigningKey(secretAccessKey, dateStamp, region, service);
+  query.set('X-Amz-Signature', await hmacHex(signingKey, stringToSign));
+  return c.json({ url: `https://${host}${canonicalUri}?${query.toString()}` });
 });
+
+function awsEncode(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
 
 // --- Shift Management ---
 routes.post('/shifts/start', async (c) => {
@@ -3200,6 +3768,8 @@ routes.post('/merchants/:id/:type', async (c) => {
 // --- Merchant Approval ---
 routes.post('/approve-merchant', async (c) => {
   try {
+    const actor = await getAuthUser(c);
+    if (!actor || String(actor.role).toLowerCase() !== 'admin') return c.json({ error: 'Administrator access is required' }, 403);
     const { merchantId, terminalsCount } = await c.req.json();
     if (!merchantId) return c.json({ error: 'merchantId is required' }, 400);
 
@@ -3228,29 +3798,45 @@ routes.post('/approve-merchant', async (c) => {
     }
     await kv.set(`terminals:${merchantId}`, terminals);
 
-    // Generate default admin credentials
-    const merchantEmail = `admin@${(merchant.name || 'merchant').toLowerCase().replace(/[^a-z0-9]/g, '')}.co.za`;
-    const password = `Clint-${Math.random().toString(36).slice(2, 10)}`;
-    const userId = await createAdminUser(merchantEmail, password, `${merchant.name} Admin`, 'Manager', merchantId);
+    const applications = await kv.getByPrefix('onboarding:');
+    const application = (applications || []).find((candidate: any) => candidate?.merchantId === merchantId);
+    let emailDispatched = false;
+    if (application) {
+      application.status = 'Approved';
+      application.approvedAt = merchant.approvedAt;
+      await kv.set(application.id, application);
+    }
 
-    await createAuditLog('system', 'MERCHANT_APPROVED', { merchantId, terminals: count, adminEmail: merchantEmail });
+    await createAuditLog('system', 'MERCHANT_APPROVED', { merchantId, terminals: count, applicantEmail: application?.account?.email || null });
     await createNotification('SYSTEM', `Merchant ${merchant.name} has been approved and provisioned with ${count} terminal(s).`);
     await cache.invalidate('merchants_list');
 
-    // Dispatch email notification to merchant
-    await createEmailNotification(
-      merchantEmail,
-      `CLINTPOS: Your Merchant Application Has Been Approved`,
-      `Congratulations! Your merchant account "${merchant.name}" has been approved and provisioned with ${count} terminal(s).\n\nYour admin login credentials:\nEmail: ${merchantEmail}\nPassword: ${password}\n\nPlease change your password on first login.\n\n— CLINTPOS Compliance Team`,
-      { type: 'approval', merchantId, merchantName: merchant.name }
-    );
+    if (application?.account?.email && application.emailOrigin) {
+      const setupToken = randomHex(32);
+      const setupTokenHash = await sha256Hex(setupToken);
+      await kv.set(`account_setup:${setupTokenHash}`, {
+        applicationKey: application.id,
+        email: String(application.account.email).toLowerCase(),
+        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        used: false,
+      });
+      const setupUrl = new URL('/', application.emailOrigin);
+      setupUrl.searchParams.set('setup', setupToken);
+      const approvalEmail = await createEmailNotification(
+        application.account.email,
+        `CLINTPOS: ${merchant.name} has been approved`,
+        `Congratulations ${application.account.firstName || 'there'},\n\nYour merchant application for ${merchant.name} has been approved and provisioned with ${count} terminal(s).\n\nUse the secure button below within seven days to choose your username and create your password. Your CLINTPOS account becomes available after this setup is complete.`,
+        { type: 'approval', merchantId, merchantName: merchant.name, applicationId: application.applicationId, ctaLabel: 'Create username and password', ctaUrl: setupUrl.toString(), idempotencyKey: `merchant-approved-${application.applicationId}` }
+      );
+      emailDispatched = approvalEmail.status === 'sent';
+    }
 
     return c.json({
       success: true,
       merchant,
-      credentials: { email: merchantEmail, password },
+      applicantEmail: application?.account?.email || null,
       terminals: terminals.length,
-      emailDispatched: true
+      emailDispatched
     });
   } catch (e: any) {
     console.error('[approve-merchant] Error:', e);
@@ -3275,7 +3861,7 @@ routes.post('/update-document-status', async (c) => {
       status,
       reason: reason || null,
       reviewedAt: new Date().toISOString(),
-      reviewedBy: c.get('authUser')?.id || 'system'
+      reviewedBy: currentUser(c)?.id || 'system'
     };
     await kv.set(docKey, updated);
 
@@ -4742,7 +5328,7 @@ routes.post('/restaurant/invoices/email', async (c) => {
       merchantId: transaction.merchantId || body.merchantId || 'merchant:M4',
       receiptNumber: transaction.receiptNumber || transaction.id,
     });
-    return c.json({ success: true, queued: true, email: queued });
+    return c.json({ success: queued.status === 'sent', queued: queued.status === 'sent', email: queued });
   } catch (e: any) {
     console.error('[Restaurant invoice email] Error:', e?.message || e);
     return c.json({ success: false, error: 'Could not queue invoice email' }, 500);
@@ -4754,11 +5340,11 @@ routes.post('/restaurant/invoices/email', async (c) => {
 // ═══════════════════════════════════════════════════════════════
 
 const MERCHANT_IDS = ['merchant:M1', 'merchant:M2', 'merchant:M3', 'merchant:M4'];
-const MERCHANT_META: Record<string, { name: string; type: string; color: string }> = {
-  'merchant:M1': { name: 'Sandton Gateway Retail', type: 'Retail', color: '#6366f1' },
-  'merchant:M2': { name: 'V&A Waterfront Fuels', type: 'Forecourt', color: '#10b981' },
-  'merchant:M3': { name: 'Roxton Workshop Hub', type: 'Workshop', color: '#f97316' },
-  'merchant:M4': { name: 'Melrose Arch Kitchen', type: 'Restaurant', color: '#ec4899' },
+const MERCHANT_META: Record<string, { name: string; type: string; color: string; lat: number; lng: number }> = {
+  'merchant:M1': { name: 'Sandton Gateway Retail', type: 'Retail', color: '#6366f1', lat: -26.1076, lng: 28.0567 },
+  'merchant:M2': { name: 'V&A Waterfront Fuels', type: 'Forecourt', color: '#10b981', lat: -33.9249, lng: 18.4241 },
+  'merchant:M3': { name: 'Roxton Workshop Hub', type: 'Workshop', color: '#f97316', lat: -27.7667, lng: 26.7833 },
+  'merchant:M4': { name: 'Melrose Arch Kitchen', type: 'Restaurant', color: '#ec4899', lat: -26.1405, lng: 28.0683 },
 };
 
 routes.get('/admin/cross-tenant-dashboard', async (c) => {
@@ -4805,7 +5391,7 @@ routes.get('/admin/cross-tenant-dashboard', async (c) => {
     let globalActiveShifts = 0;
 
     for (const mId of MERCHANT_IDS) {
-      const meta = MERCHANT_META[mId] || { name: mId, type: 'Unknown', color: '#888' };
+      const meta = MERCHANT_META[mId] || { name: mId, type: 'Unknown', color: '#888', lat: 0, lng: 0 };
       const merchantTx = allTx.filter((t: any) => t.merchantId === mId);
       const merchantStock = allStock.filter((s: any) => s.merchantId === mId);
       const merchantShifts = allShifts.filter((s: any) => s.merchantId === mId);
@@ -4834,6 +5420,8 @@ routes.get('/admin/cross-tenant-dashboard', async (c) => {
         name: meta.name,
         type: meta.type,
         color: meta.color,
+        lat: meta.lat,
+        lng: meta.lng,
         totalSales: Math.round(totalSales * 100) / 100,
         todaySales: Math.round(todaySales * 100) / 100,
         todayTxCount: todayTx.length,
@@ -5053,10 +5641,10 @@ routes.post('/split-bill', async (c) => {
 // ═══ ADMIN: Cross-Tenant Export Report (FR-51) ════════════════
 // ═══════════════════════════════════════════════════════════════
 
-routes.post('/admin/export-report', async (c) => {
-  try {
-    const body = await c.req.json();
-    const { format, dateFrom, dateTo, tenantFilter, reportType } = body;
+// Cross-tenant report computation. Shared by the direct export endpoint
+// and background export jobs so both paths stay identical.
+async function buildCrossTenantReport(opts: { dateFrom?: string; dateTo?: string; tenantFilter?: string }): Promise<any> {
+  const { dateFrom, dateTo, tenantFilter } = opts;
 
     const allTxRaw = await kv.getByPrefix('tx:');
     const allStockRaw = await kv.getByPrefix('stock:');
@@ -5123,7 +5711,11 @@ routes.post('/admin/export-report', async (c) => {
       },
     };
 
-    if (format === 'csv') {
+  return reportData;
+}
+
+// CSV rendering for a built report.
+function buildReportCsv(reportData: any): string {
       const lines: string[] = [];
       lines.push('Roxton POS - Cross-Tenant Report');
       lines.push(`Generated: ${reportData.generatedAt}`);
@@ -5148,7 +5740,17 @@ routes.post('/admin/export-report', async (c) => {
         const dateStr = new Date(tx.date).toLocaleString('en-ZA');
         lines.push(`"${dateStr}",${tx.merchant},"R ${tx.amount.toFixed(2)}",${tx.method},"${tx.cashier || ''}","${tx.receiptNo || ''}",${tx.items},${tx.status}`);
       }
-      return c.json({ success: true, format: 'csv', csv: lines.join('\n'), reportData });
+      return lines.join('\n');
+}
+
+routes.post('/admin/export-report', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { format, dateFrom, dateTo, tenantFilter, reportType } = body;
+    const reportData = await buildCrossTenantReport({ dateFrom, dateTo, tenantFilter });
+
+    if (format === 'csv') {
+      return c.json({ success: true, format: 'csv', csv: buildReportCsv(reportData), reportData });
     }
 
     return c.json({ success: true, format: 'pdf', reportData });
@@ -5157,6 +5759,131 @@ routes.post('/admin/export-report', async (c) => {
     return c.json({ error: 'Export failed', details: e?.message }, 500);
   }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// ═══ JOBS: background import/export via RabbitMQ or inline ═════
+// ═══════════════════════════════════════════════════════════════
+// POST /jobs { type: 'loyaltyhub-import' | 'report-export', params } -> 202 + job
+// GET  /jobs?limit=N, GET /jobs/:id, PATCH /jobs/:id (worker updates)
+
+const JOB_ARTIFACT_MAX_BYTES = 400 * 1024;
+
+registerJobHandler('loyaltyhub-import', async (job: Job, update: JobUpdate) => {
+  const params = (job.params || {}) as Record<string, unknown>;
+  const maxBatches = Math.min(Math.max(Number(params.maxBatches) || 10, 1), 40);
+  const limit = Math.min(Math.max(Number(params.limit) || 500, 1), 500);
+  let cursor = typeof params.cursor === 'string' ? params.cursor : '';
+
+  // Resume an interrupted import where it left off.
+  const existing = await getImportStatus().catch(() => null);
+  if (!cursor && existing?.status === 'running' && typeof existing?.nextCursor === 'string') {
+    cursor = String(existing.nextCursor);
+  }
+
+  let pushed = 0;
+  let processed = Number(existing?.processedRows || 0);
+  let total: number | null = Number(existing?.sourceRows || 0) || null;
+
+  for (let i = 0; i < maxBatches; i += 1) {
+    const r = await runLoyaltyHubCatalogBatch(cursor, limit);
+    if (r.status !== 200 || !r.body?.success) {
+      throw new Error(r.body?.error || `Import batch failed (HTTP ${r.status})`);
+    }
+    pushed += Number(r.body.imported || 0);
+    processed = Number(r.body.processedRows ?? processed);
+    if (Number(r.body.totalRows) > 0) total = Number(r.body.totalRows);
+    await update({ progress: { processed, total, message: `Batch ${i + 1}: ${pushed.toLocaleString()} products pushed` } });
+    if (!r.body.hasMore || !r.body.nextCursor) break;
+    cursor = String(r.body.nextCursor);
+  }
+  return { pushed, processedRows: processed, sourceRows: total };
+});
+
+registerJobHandler('report-export', async (job: Job, update: JobUpdate) => {
+  const params = (job.params || {}) as Record<string, unknown>;
+  const format = String(params.format || 'csv');
+  if (format !== 'csv' && format !== 'pdf') throw new Error(`Unsupported export format: ${format}`);
+  await update({ progress: { processed: 0, total: null, message: 'Building report…' } });
+  const reportData = await buildCrossTenantReport({
+    dateFrom: typeof params.dateFrom === 'string' ? params.dateFrom : undefined,
+    dateTo: typeof params.dateTo === 'string' ? params.dateTo : undefined,
+    tenantFilter: typeof params.tenantFilter === 'string' ? params.tenantFilter : 'all',
+  });
+  await update({ progress: { processed: 1, total: 2, message: 'Rendering artifact…' } });
+  const artifact = format === 'csv' ? buildReportCsv(reportData) : reportData;
+  const bytes = new TextEncoder().encode(JSON.stringify(artifact)).length;
+  if (bytes > JOB_ARTIFACT_MAX_BYTES) {
+    throw new Error(`Report artifact is ${(bytes / 1024).toFixed(0)}KB (limit 400KB). Narrow the date range or filter to one tenant.`);
+  }
+  await update({ progress: { processed: 2, total: 2, message: 'Ready to download' } });
+  return { format, artifact, generatedAt: reportData.generatedAt };
+});
+
+routes.post('/jobs', async (c: any) => {
+  const authUser = currentUser(c);
+  if (!authUser || !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Job submission requires Admin or Stock Controller access' }, 403);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const type = String(body.type || '');
+  if (type !== 'loyaltyhub-import' && type !== 'report-export') {
+    return c.json({ success: false, error: `Unknown job type: ${type || '(missing)'}` }, 400);
+  }
+  try {
+    const job = await createJob(type, body.params || {}, authUser.email || authUser.id || null);
+    return c.json({ success: true, job }, 202);
+  } catch (e: any) {
+    return c.json({ success: false, error: e?.message || 'Job submission failed' }, 500);
+  }
+});
+
+routes.get('/jobs', async (c: any) => {
+  const authUser = currentUser(c);
+  if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Job access denied' }, 403);
+  }
+  const limit = Math.min(Math.max(Number(c.req.query('limit')) || 20, 1), 50);
+  return c.json({ success: true, jobs: await listJobs(limit) });
+});
+
+routes.get('/jobs/:id', async (c: any) => {
+  const authUser = currentUser(c);
+  if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Job access denied' }, 403);
+  }
+  const job = await getJob(c.req.param('id'));
+  if (!job) return c.json({ success: false, error: 'Job not found' }, 404);
+  return c.json({ success: true, job });
+});
+
+routes.patch('/jobs/:id', async (c: any) => {
+  // Workers authenticate with the shared WORKER_SECRET; humans need a role.
+  const header = c.req.header('Authorization') || '';
+  let workerSecret = '';
+  try { workerSecret = Deno.env.get('WORKER_SECRET') || ''; } catch { /* ignore */ }
+  const isWorker = workerSecret !== '' && header === `Bearer ${workerSecret}`;
+  const authUser = currentUser(c);
+  if (!isWorker && (!authUser || !['Admin', 'StockController'].includes(authUser.role))) {
+    return c.json({ error: 'Job update requires worker secret or Admin/Stock Controller access' }, 403);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const job = await patchJob(c.req.param('id'), body || {});
+  if (!job) return c.json({ success: false, error: 'Job not found' }, 404);
+  return c.json({ success: true, job });
+});
+
+routes.get('/cache/stats', async (c: any) => {
+  const authUser = currentUser(c);
+  if (authUser && !['Admin', 'StockController'].includes(authUser.role)) {
+    return c.json({ error: 'Cache stats access denied' }, 403);
+  }
+  return c.json({
+    success: true,
+    cache: getCacheStats(),
+    queue: { rabbitmq: rabbitConfigured() },
+  });
+});
+
 
 // ═══════════════════════════════════════════════════════════════
 // ═══ ADMIN: SSE Live Stream (FR-52) ═══════════════════════════
@@ -5396,7 +6123,7 @@ routes.post('/batches/settle', async (c) => {
             batchId,
             status: 'Settled',
             settledAt: new Date().toISOString(),
-            settledBy: c.get('authUser')?.id || 'system'
+            settledBy: currentUser(c)?.id || 'system'
         };
         await kv.set(kvKey, record);
 

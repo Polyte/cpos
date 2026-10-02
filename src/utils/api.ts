@@ -91,13 +91,46 @@ function getStoredToken(): string {
   try { return localStorage.getItem('clintpos_auth_token') || ANON_KEY; } catch { return ANON_KEY; }
 }
 
+function safeUuid(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch { /* fall through */ }
+  const hex = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
+  return `${hex()}${hex()}-${hex()}-4${hex().substring(1)}-${hex()}-${hex()}${hex()}${hex()}`;
+}
+
+function safeRandomId(prefix: string): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `${prefix}-${crypto.randomUUID().substring(0, 8).toUpperCase()}`;
+    }
+  } catch { /* fall through to Math.random fallback */ }
+  return `${prefix}-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+}
+
+function safeStorageGet(store: 'local' | 'session', key: string): string | null {
+  try {
+    const s = store === 'local' ? localStorage : sessionStorage;
+    return s.getItem(key);
+  } catch { return null; }
+}
+
+function safeStorageSet(store: 'local' | 'session', key: string, value: string): void {
+  try {
+    const s = store === 'local' ? localStorage : sessionStorage;
+    s.setItem(key, value);
+  } catch { /* private mode / blocked storage: headers still work without persistence */ }
+}
+
 async function getHeaders() {
   const token = getStoredToken();
-  const nodeId = localStorage.getItem('clintpos_node_id') || `NODE-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-  const sessionId = sessionStorage.getItem('clintpos_session_id') || `SESS-${crypto.randomUUID().substring(0, 8).toUpperCase()}`;
+  const nodeId = safeStorageGet('local', 'clintpos_node_id') || safeRandomId('NODE');
+  const sessionId = safeStorageGet('session', 'clintpos_session_id') || safeRandomId('SESS');
 
-  if (!localStorage.getItem('clintpos_node_id')) localStorage.setItem('clintpos_node_id', nodeId);
-  if (!sessionStorage.getItem('clintpos_session_id')) sessionStorage.setItem('clintpos_session_id', sessionId);
+  if (!safeStorageGet('local', 'clintpos_node_id')) safeStorageSet('local', 'clintpos_node_id', nodeId);
+  if (!safeStorageGet('session', 'clintpos_session_id')) safeStorageSet('session', 'clintpos_session_id', sessionId);
 
   return {
     'Content-Type': 'application/json',
@@ -355,7 +388,7 @@ export const api = {
     promoDiscount?: number;
     idempotencyKey?: string;
   }) => {
-    const iKey = payload.idempotencyKey || crypto.randomUUID();
+    const iKey = payload.idempotencyKey || safeUuid();
     // Strip idempotencyKey from body (sent as header instead)
     const { idempotencyKey: _ik, ...body } = payload;
     const doAttempt = async (attempt: number): Promise<any> => {

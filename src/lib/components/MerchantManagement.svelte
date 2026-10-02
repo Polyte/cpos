@@ -1509,35 +1509,13 @@
               </div>
 
               <div class="p-8 bg-neutral-900 rounded-[32px] text-white relative overflow-hidden">
-                <div class="absolute top-0 right-0 p-6 opacity-5"><Key class="w-40 h-40" /></div>
                 <div class="relative z-10">
-                  <div class="flex items-center gap-3 mb-6">
+                  <div class="flex items-center gap-3 mb-3">
                     <Key class="w-5 h-5 text-amber-400" />
-                    <h5 class="text-[10px] font-black uppercase tracking-widest text-amber-400">Merchant Admin Credentials</h5>
+                    <h5 class="text-[10px] font-black uppercase tracking-widest text-amber-400">Merchant account setup</h5>
                   </div>
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div>
-                      <p class="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-2">Login Email</p>
-                      <div class="flex items-center gap-3">
-                        <p class="text-sm font-bold text-white font-mono">{approvalResult.credentials?.email}</p>
-                        <button onclick={() => { navigator.clipboard.writeText(approvalResult.credentials?.email || ''); toast.success('Email copied'); }} class="p-1.5 hover:bg-white/10 rounded-lg transition-all">
-                          <Copy class="w-3.5 h-3.5 text-neutral-500" />
-                        </button>
-                      </div>
-                    </div>
-                    <div>
-                      <p class="text-[9px] font-black uppercase tracking-widest text-neutral-500 mb-2">Temporary Password</p>
-                      <div class="flex items-center gap-3">
-                        <p class="text-sm font-bold text-amber-400 font-mono">{approvalResult.credentials?.password}</p>
-                        <button onclick={() => { navigator.clipboard.writeText(approvalResult.credentials?.password || ''); toast.success('Password copied'); }} class="p-1.5 hover:bg-white/10 rounded-lg transition-all">
-                          <Copy class="w-3.5 h-3.5 text-neutral-500" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="mt-6 p-4 bg-white/5 rounded-2xl border border-white/10">
-                    <p class="text-[9px] font-medium text-neutral-400 leading-relaxed">Share these credentials securely with the merchant admin. They must change the password on first login. These credentials are stored in the audit log for compliance purposes.</p>
-                  </div>
+                  <p class="text-sm font-medium text-neutral-200">The merchant chooses their own username and password through the secure link in the approval email. No password is generated or displayed here.</p>
+                  {#if approvalResult.applicantEmail}<p class="mt-3 text-xs text-neutral-400">Applicant: {approvalResult.applicantEmail}</p>{/if}
                 </div>
               </div>
 
@@ -1548,9 +1526,12 @@
                   </div>
                   <div>
                     <p class="text-xs font-black text-indigo-700 dark:text-indigo-300">Email Notification Dispatched</p>
-                    <p class="text-[9px] font-medium text-indigo-500 dark:text-indigo-400/70">Approval confirmation and login credentials have been queued for delivery to the merchant admin email.</p>
+                    <p class="text-[9px] font-medium text-indigo-500 dark:text-indigo-400/70">The approval confirmation and single-use account setup link were sent to the applicant.</p>
                   </div>
                 </div>
+              {/if}
+              {#if !approvalResult.emailDispatched}
+                <p class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">The merchant is approved, but the setup email could not be delivered. Check the configured sender in Resend and send the setup link again.</p>
               {/if}
             </div>
           </div>

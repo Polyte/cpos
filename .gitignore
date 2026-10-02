@@ -46,3 +46,8 @@ mobile-app/.git-backup-before-parent-add/
 
 # Accidental Windows artifact
 nul
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example

@@ -208,13 +208,46 @@ function getStoredToken(): string {
   try { return localStorage.getItem('clintpos_auth_token') || ANON_KEY; } catch { return ANON_KEY; }
 }
 
+function safeUuid(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch { /* fall through */ }
+  const hex = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
+  return `${hex()}${hex()}-${hex()}-4${hex().substring(1)}-${hex()}-${hex()}${hex()}${hex()}`;
+}
+
+function safeRandomId(prefix: string): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `${prefix}-${crypto.randomUUID().substring(0, 8).toUpperCase()}`;
+    }
+  } catch { /* fall through to Math.random fallback */ }
+  return `${prefix}-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+}
+
+function safeStorageGet(store: 'local' | 'session', key: string): string | null {
+  try {
+    const s = store === 'local' ? localStorage : sessionStorage;
+    return s.getItem(key);
+  } catch { return null; }
+}
+
+function safeStorageSet(store: 'local' | 'session', key: string, value: string): void {
+  try {
+    const s = store === 'local' ? localStorage : sessionStorage;
+    s.setItem(key, value);
+  } catch { /* private mode / blocked storage: headers still work without persistence */ }
+}
+
 async function getHeaders() {
   const token = getStoredToken();
-  const nodeId = localStorage.getItem('clintpos_node_id') || `NODE-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-  const sessionId = sessionStorage.getItem('clintpos_session_id') || `SESS-${crypto.randomUUID().substring(0, 8).toUpperCase()}`;
+  const nodeId = safeStorageGet('local', 'clintpos_node_id') || safeRandomId('NODE');
+  const sessionId = safeStorageGet('session', 'clintpos_session_id') || safeRandomId('SESS');
 
-  if (!localStorage.getItem('clintpos_node_id')) localStorage.setItem('clintpos_node_id', nodeId);
-  if (!sessionStorage.getItem('clintpos_session_id')) sessionStorage.setItem('clintpos_session_id', sessionId);
+  if (!safeStorageGet('local', 'clintpos_node_id')) safeStorageSet('local', 'clintpos_node_id', nodeId);
+  if (!safeStorageGet('session', 'clintpos_session_id')) safeStorageSet('session', 'clintpos_session_id', sessionId);
 
   return {
     'Content-Type': 'application/json',
@@ -340,6 +373,27 @@ export const api = {
       }
       return { error: e?.message || 'Login failed' };
     }
+  },
+  sendOnboardingEmailOtp: async (email: string) => {
+    const res = await fetchWithTimeout(`${SERVER_URL}/onboarding/email/send-otp`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ANON_KEY}` },
+      body: JSON.stringify({ email })
+    });
+    return await safeJson(res, { success: false, error: 'Could not send verification code' });
+  },
+  verifyOnboardingEmailOtp: async (email: string, code: string) => {
+    const res = await fetchWithTimeout(`${SERVER_URL}/onboarding/email/verify-otp`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ANON_KEY}` },
+      body: JSON.stringify({ email, code })
+    });
+    return await safeJson(res, { success: false, error: 'Could not verify email' });
+  },
+  completeMerchantAccount: async (token: string, username: string, password: string) => {
+    const res = await fetchWithTimeout(`${SERVER_URL}/onboarding/setup-account`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ANON_KEY}` },
+      body: JSON.stringify({ token, username, password })
+    });
+    return await safeJson(res, { success: false, error: 'Could not create your account' });
   },
   signup: async (data: any) => {
     try {
@@ -472,6 +526,15 @@ export const api = {
       return { count: 0 };
     }
   },
+  getProductCloudImportStatus: async () => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/import-status`, { headers: await getHeaders() });
+      return await safeJson(res, { status: 'never', sourceRows: null, processedRows: 0, completedAt: null });
+    } catch (e) {
+      console.error('[API] product cloud import status error:', e);
+      return { status: 'never', sourceRows: null, processedRows: 0, completedAt: null };
+    }
+  },
   getProductCloudPage: async (page = 1, limit = 100, query = '') => {
     try {
       const params = new URLSearchParams({ page: String(page), limit: String(limit) });
@@ -496,17 +559,52 @@ export const api = {
       return { success: false, error: e?.message || 'BarcodeNest enrichment failed' };
     }
   },
-  importLoyaltyHubCatalog: async (offset = 0, limit = 500) => {
+  importLoyaltyHubCatalog: async (cursor: string | null = null, limit = 500) => {
+    const retryableStatuses = new Set([408, 429, 500, 502, 503, 504]);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/import-loyaltyhub-catalog`, {
+          method: 'POST',
+          headers: await getHeaders(),
+          body: JSON.stringify({ cursor, limit }),
+        }, 120000);
+        if (retryableStatuses.has(res.status) && attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+          continue;
+        }
+        return await safeJson(res, { success: false, error: `LoyaltyHub import failed (HTTP ${res.status})` });
+      } catch (e: any) {
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+          continue;
+        }
+        console.error('[API] LoyaltyHub catalogue import error:', e);
+        return { success: false, error: e?.message || 'LoyaltyHub import failed' };
+      }
+    }
+    return { success: false, error: 'LoyaltyHub import failed' };
+  },
+  // --- Background jobs (RabbitMQ when configured, inline fallback) ---
+  createJob: async (type: 'loyaltyhub-import' | 'report-export', params: Record<string, unknown> = {}) => {
     try {
-      const res = await fetchWithTimeout(`${SERVER_URL}/product-cloud/import-loyaltyhub-catalog`, {
+      const res = await fetchWithTimeout(`${SERVER_URL}/jobs`, {
         method: 'POST',
         headers: await getHeaders(),
-        body: JSON.stringify({ offset, limit }),
-      }, 120000);
-      return await safeJson(res, { success: false, error: 'LoyaltyHub import failed' });
+        body: JSON.stringify({ type, params }),
+      }, 30000);
+      return await safeJson(res, { success: false, error: `Job submission failed (HTTP ${res.status})` });
     } catch (e: any) {
-      console.error('[API] LoyaltyHub catalogue import error:', e);
-      return { success: false, error: e?.message || 'LoyaltyHub import failed' };
+      console.error('[API] createJob error:', e);
+      return { success: false, error: e?.message || 'Job submission failed' };
+    }
+  },
+  getJob: async (id: string) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/jobs/${encodeURIComponent(id)}`, { headers: await getHeaders() }, 30000);
+      return await safeJson(res, { success: false, error: `Job fetch failed (HTTP ${res.status})` });
+    } catch (e: any) {
+      console.error('[API] getJob error:', e);
+      return { success: false, error: e?.message || 'Job fetch failed' };
     }
   },
   saveStock: async (data: any) => {
@@ -571,7 +669,7 @@ export const api = {
     promoDiscount?: number;
     idempotencyKey?: string;
   }) => {
-    const iKey = payload.idempotencyKey || crypto.randomUUID();
+    const iKey = payload.idempotencyKey || safeUuid();
     try {
       if (localStorage.getItem('clintpos_auth_token')?.startsWith('local-dev-')) {
         return localDemoPayment(payload, iKey);
@@ -1556,6 +1654,28 @@ export const api = {
     } catch (e) {
       console.error('[API] getAdminDashboard error:', e);
       return null;
+    }
+  },
+  getProductImportSettings: async () => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/admin/product-import-settings`, { headers: await getHeaders() });
+      return await safeJson(res, { enabled: false, offset: 0 });
+    } catch (e) {
+      console.error('[API] getProductImportSettings error:', e);
+      return { enabled: false, offset: 0 };
+    }
+  },
+  setProductImportSettings: async (enabled: boolean, offset?: number) => {
+    try {
+      const res = await fetchWithTimeout(`${SERVER_URL}/admin/product-import-settings`, {
+        method: 'PUT',
+        headers: await getHeaders(),
+        body: JSON.stringify({ enabled, ...(offset === undefined ? {} : { offset }) }),
+      });
+      return await safeJson(res, { enabled, offset: offset || 0 });
+    } catch (e) {
+      console.error('[API] setProductImportSettings error:', e);
+      return { enabled, offset: offset || 0, error: 'Could not save importer setting' };
     }
   },
 

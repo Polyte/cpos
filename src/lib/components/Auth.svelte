@@ -173,7 +173,13 @@
   // Component state
   // ---------------------------------------------------------------------------
 
-  let mode = $state<'login' | 'onboarding'>('login');
+  let mode = $state<'login' | 'onboarding' | 'account-setup'>(
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('setup') ? 'account-setup' : 'login'
+  );
+  let setupToken = $state(typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('setup') || '' : '');
+  let setupUsername = $state('');
+  let setupPassword = $state('');
+  let setupPasswordConfirm = $state('');
   let loading = $state(false);
   let isSeeding = $state(false);
   let selectedProfileIdx = $state(1); // Default to Retail
@@ -307,10 +313,39 @@
       loading = false;
     }
   }
+
+  async function handleAccountSetup(e: SubmitEvent) {
+    e.preventDefault();
+    if (setupPassword !== setupPasswordConfirm) return toast.error('Passwords do not match');
+    loading = true;
+    try {
+      const result = await api.completeMerchantAccount(setupToken, setupUsername, setupPassword);
+      if (!result.success) throw new Error(result.error || 'Could not create your account');
+      email = result.username;
+      password = '';
+      mode = 'login';
+      window.history.replaceState({}, '', `${window.location.pathname}${window.location.hash}`);
+      toast.success('Your login is ready. Sign in with your username and password.');
+    } catch (error: any) {
+      toast.error(error.message || 'Could not create your account');
+    } finally { loading = false; }
+  }
 </script>
 
 {#if mode === 'onboarding'}
   <MerchantOnboarding oncomplete={() => (mode = 'login')} />
+{:else if mode === 'account-setup'}
+  <div class="min-h-screen bg-background flex items-center justify-center p-6">
+    <form onsubmit={handleAccountSetup} class="w-full max-w-md space-y-5 rounded-3xl border bg-card p-8 shadow-xl">
+      <div class="flex justify-center"><img src={clintposLogo} alt="CLINTPOS" class="h-10 object-contain" /></div>
+      <div class="text-center"><h1 class="text-2xl font-bold text-foreground">Create your merchant login</h1><p class="mt-2 text-sm text-muted-foreground">Choose the username and password you’ll use to sign in.</p></div>
+      <div class="space-y-2"><label for="setup-username" class="text-sm font-semibold">Username</label><Input id="setup-username" bind:value={setupUsername} autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9._-]+" required placeholder="Choose a username" /></div>
+      <div class="space-y-2"><label for="setup-password" class="text-sm font-semibold">Password</label><Input id="setup-password" type="password" bind:value={setupPassword} autocomplete="new-password" minlength="8" required placeholder="At least 8 characters, uppercase and a number" /></div>
+      <div class="space-y-2"><label for="setup-password-confirm" class="text-sm font-semibold">Confirm password</label><Input id="setup-password-confirm" type="password" bind:value={setupPasswordConfirm} autocomplete="new-password" minlength="8" required placeholder="Enter it again" /></div>
+      <Button type="submit" disabled={loading || !setupToken} class="w-full">{#if loading}<Loader2 size={18} class="animate-spin" />{:else}Create login<ArrowRight size={18} />{/if}</Button>
+      {#if !setupToken}<p class="text-sm text-destructive text-center">This account setup link is invalid. Open the latest link from your approval email.</p>{/if}
+    </form>
+  </div>
 
 <!-- =========================================================================
      Login screen — split layout
@@ -469,8 +504,8 @@
                 <FieldSeparator>Credentials</FieldSeparator>
 
                 <Field>
-                  <FieldLabel for="email">Email</FieldLabel>
-                  <Input id="email" type="email" bind:value={email} placeholder="user@roxton.com" required />
+                  <FieldLabel for="email">Email or username</FieldLabel>
+                  <Input id="email" type="text" bind:value={email} placeholder="you@example.com or username" autocomplete="username" required />
                 </Field>
                 <Field>
                   <FieldLabel for="password">Password</FieldLabel>
